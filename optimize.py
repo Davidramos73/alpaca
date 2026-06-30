@@ -1,0 +1,245 @@
+import os
+import argparse
+import itertools
+import pandas as pd
+from datetime import datetime
+from dotenv import load_dotenv
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+
+# ---------------------------------------------------------------------------
+# Rangos de búsqueda (máximo 10%)
+# ---------------------------------------------------------------------------
+MAX_BUYS           = 10                                 # fijo, no modificable
+BUY_DROP_RANGE     = [r / 100 for r in range(1, 11)]   # 1% … 10%
+SELL_RISE_RANGE    = [r / 100 for r in range(1, 11)]   # 1% … 10%
+
+BUY_AMOUNT    = 10_000.0
+STARTING_CASH = 100_000.0
+
+# ---------------------------------------------------------------------------
+# Simulación (misma lógica que backtest.py, sin I/O)
+# ---------------------------------------------------------------------------
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float) -> dict:
+    cash       = STARTING_CASH
+    purchases  = []
+    total_buys = total_sells = 0
+    total_fees = 0.0
+
+    for _, row in df.iterrows():
+        price = float(row["close"])
+
+        if len(purchases) == 0:
+            qty     = BUY_AMOUNT / price
+            buy_fee = BUY_AMOUNT * fee_pct
+            cash   -= BUY_AMOUNT + buy_fee
+            total_fees += buy_fee
+            purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee})
+            total_buys += 1
+            continue
+
+        last_price  = purchases[-1]["price"]
+        buy_target  = last_price * (1.0 - buy_drop_pct)
+        sell_target = last_price * (1.0 + sell_rise_pct)
+
+        if price <= buy_target:
+            if len(purchases) < max_buys:
+                qty     = BUY_AMOUNT / price
+                buy_fee = BUY_AMOUNT * fee_pct
+                cash   -= BUY_AMOUNT + buy_fee
+                total_fees += buy_fee
+                purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee})
+                total_buys += 1
+
+        elif price >= sell_target:
+            sold      = purchases.pop()
+            revenue   = sold["qty"] * price
+            sell_fee  = revenue * fee_pct
+            cash     += revenue - sell_fee
+            total_fees += sell_fee
+            total_sells += 1
+
+    final_price    = float(df.iloc[-1]["close"])
+    holdings_value = sum(p["qty"] for p in purchases) * final_price
+    total_equity   = cash + holdings_value
+    profit         = total_equity - STARTING_CASH
+    roi            = (profit / STARTING_CASH) * 100
+
+    return {
+        "max_buys":       max_buys,
+        "buy_drop_pct":   buy_drop_pct,
+        "sell_rise_pct":  sell_rise_pct,
+        "fee_pct":        fee_pct,
+        "roi":            roi,
+        "profit":         profit,
+        "total_equity":   total_equity,
+        "total_fees":     total_fees,
+        "buys":           total_buys,
+        "sells":          total_sells,
+        "open_positions": len(purchases),
+    }
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Optimizador de estrategia grid")
+    parser.add_argument("--symbol", type=str, default="TSLA", help="Símbolo a analizar (default: TSLA)")
+    parser.add_argument("--fee-pct", type=float, default=0.0, help="Fee por operación sobre el monto (default: 0.0). Ej: 0.001 = 0.1%%")
+    args = parser.parse_args()
+
+    load_dotenv()
+    api_key    = os.getenv("ALPACA_API_KEY")
+    secret_key = os.getenv("ALPACA_SECRET_KEY")
+    if not api_key or not secret_key:
+        print("Error: credenciales no encontradas en .env")
+        return
+
+    # --- Descargar datos una sola vez (caché por símbolo y período) ---
+    symbol     = args.symbol.upper()
+    date_start = datetime(2026, 1, 1)
+    date_end   = datetime(2026, 6, 28)
+    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}.pkl"
+
+    if os.path.exists(cache_path):
+        print(f"Cargando datos desde caché ({cache_path})…")
+        df = pd.read_pickle(cache_path)
+    else:
+        print(f"Descargando datos históricos de Alpaca para {symbol}…")
+        client = StockHistoricalDataClient(api_key, secret_key)
+        req = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Hour,
+            start=date_start,
+            end=date_end,
+        )
+        bars = client.get_stock_bars(req)
+        df   = bars.df.reset_index()
+        df.to_pickle(cache_path)
+        print(f"Datos guardados en caché ({cache_path})")
+
+    print(f"Horas de trading cargadas: {len(df)}\n")
+
+    # --- Grid search ---
+    combos = list(itertools.product(BUY_DROP_RANGE, SELL_RISE_RANGE))
+    total  = len(combos)
+    fee_pct = args.fee_pct
+    print(f"Evaluando {total} combinaciones (max_buys fijo = {MAX_BUYS}, fee = {fee_pct*100:.3f}%)…\n")
+
+    results = []
+    for i, (buy_drop, sell_rise) in enumerate(combos, 1):
+        if i % 10 == 0 or i == total:
+            print(f"  {i}/{total}", end="\r")
+        results.append(simulate(df, MAX_BUYS, buy_drop, sell_rise, fee_pct))
+
+    # --- Resultados ---
+    results.sort(key=lambda r: r["roi"], reverse=True)
+
+    top_n     = 20
+    run_ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path  = f"optimize_{symbol}_{run_ts}.log"
+    csv_path  = f"optimize_{symbol}_{run_ts}.csv"
+
+    periodo_start = df.iloc[0]["timestamp"].strftime("%Y-%m-%d")
+    periodo_end   = df.iloc[-1]["timestamp"].strftime("%Y-%m-%d")
+    precio_inicio = float(df.iloc[0]["close"])
+    precio_fin    = float(df.iloc[-1]["close"])
+    best          = results[0]
+    worst         = results[-1]
+
+    sep  = "=" * 80
+    sep2 = "-" * 80
+
+    header_row = (
+        f"{'#':>3}  {'drop%':>6}  {'rise%':>6}  {'ROI%':>8}  "
+        f"{'Ganancia':>12}  {'Capital':>12}  {'Compras':>7}  {'Ventas':>6}  {'Open':>5}"
+    )
+
+    def fmt_row(rank, r):
+        return (
+            f"{rank:>3}  "
+            f"{r['buy_drop_pct']*100:>5.0f}%  "
+            f"{r['sell_rise_pct']*100:>5.0f}%  "
+            f"{r['roi']:>+8.2f}%  "
+            f"${r['profit']:>+11,.0f}  "
+            f"${r['total_equity']:>11,.0f}  "
+            f"{r['buys']:>7}  "
+            f"{r['sells']:>6}  "
+            f"{r['open_positions']:>5}"
+        )
+
+    lines = [
+        sep,
+        f"  OPTIMIZE {symbol} — Ejecutado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        sep,
+        f"  Período analizado:  {periodo_start}  →  {periodo_end}",
+        f"  Precio {symbol} inicio: ${precio_inicio:.2f}   |   Precio {symbol} fin: ${precio_fin:.2f}",
+        f"  Horas de trading:   {len(df)}",
+        f"  Capital inicial:    ${STARTING_CASH:,.2f}   |   Monto por compra: ${BUY_AMOUNT:,.2f}",
+        f"  max_buys (fijo):    {MAX_BUYS}",
+        f"  Combinaciones evaluadas: {total}  "
+        f"(drop 1-10% × rise 1-10%)",
+        sep,
+        "",
+        f"  TOP {top_n} COMBINACIONES (ordenadas por ROI)",
+        sep2,
+        header_row,
+        sep2,
+    ]
+
+    for rank, r in enumerate(results[:top_n], 1):
+        lines.append(fmt_row(rank, r))
+
+    lines += [
+        sep2,
+        "",
+        "  MEJOR COMBINACIÓN",
+        sep2,
+        f"  buy_drop_pct  : {best['buy_drop_pct']*100:.0f}%",
+        f"  sell_rise_pct : {best['sell_rise_pct']*100:.0f}%",
+        f"  ROI           : {best['roi']:+.2f}%",
+        f"  Ganancia      : ${best['profit']:+,.2f}",
+        f"  Capital final : ${best['total_equity']:,.2f}",
+        f"  Compras/Ventas: {best['buys']} / {best['sells']}",
+        f"  Pos. abiertas : {best['open_positions']}",
+        "",
+        "  PEOR COMBINACIÓN",
+        sep2,
+        f"  buy_drop_pct  : {worst['buy_drop_pct']*100:.0f}%",
+        f"  sell_rise_pct : {worst['sell_rise_pct']*100:.0f}%",
+        f"  ROI           : {worst['roi']:+.2f}%",
+        f"  Ganancia      : ${worst['profit']:+,.2f}",
+        f"  Capital final : ${worst['total_equity']:,.2f}",
+        f"  Compras/Ventas: {worst['buys']} / {worst['sells']}",
+        f"  Pos. abiertas : {worst['open_positions']}",
+        "",
+        "  TODAS LAS COMBINACIONES (ordenadas por ROI)",
+        sep2,
+        header_row,
+        sep2,
+    ]
+
+    for rank, r in enumerate(results, 1):
+        lines.append(fmt_row(rank, r))
+
+    lines += [sep, f"  CSV completo: {csv_path}", sep]
+
+    log_content = "\n".join(lines)
+
+    # --- Imprimir en consola ---
+    console_lines = lines[:lines.index("  TODAS LAS COMBINACIONES (ordenadas por ROI)")]
+    print("\n" + "\n".join(console_lines))
+
+    # --- Escribir log ---
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write(log_content + "\n")
+
+    # --- Guardar CSV completo ---
+    pd.DataFrame(results).to_csv(csv_path, index=False)
+
+    print(f"\nLog guardado en  : {log_path}")
+    print(f"CSV guardado en  : {csv_path}")
+
+if __name__ == "__main__":
+    main()
