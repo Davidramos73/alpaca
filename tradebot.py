@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
+from alpaca.common.enums import Sort
 from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
@@ -51,35 +52,60 @@ def save_state(state: dict, state_file: str):
         logging.exception(f"Error al guardar estado en {state_file}")
 
 
-def verify_broker_state(trading_client, symbol: str, purchases: list) -> bool:
-    """Compara el estado local (purchases) contra la posición real y las
-    órdenes abiertas en Alpaca. Devuelve False si hay una discrepancia,
-    para evitar que el bot compre de nuevo sobre una posición que ya existe."""
-    local_qty = sum(p["qty"] for p in purchases)
+def rebuild_purchases_from_history(trading_client, symbol: str) -> tuple[list, float]:
+    """Reconstruye los lotes de compra activos y el profit_pool repitiendo el
+    historial de órdenes FILLED de Alpaca para este símbolo. Asume LIFO: cada
+    venta cierra el lote comprado más reciente, igual que hace el bucle
+    principal (`purchases.pop()`). Se usa para resincronizar el estado local
+    cuando se perdió un guardado (ej. reinicio del contenedor a mitad de una
+    compra)."""
+    req = GetOrdersRequest(
+        symbols=[symbol],
+        status=QueryOrderStatus.CLOSED,
+        direction=Sort.ASC,
+        limit=500,
+    )
+    orders = trading_client.get_orders(filter=req)
+    filled = sorted(
+        (o for o in orders if o.status == OrderStatus.FILLED),
+        key=lambda o: o.filled_at,
+    )
 
-    try:
-        position = trading_client.get_open_position(symbol)
-        broker_qty = abs(float(position.qty))
-    except APIError:
-        broker_qty = 0.0
+    purchases: list = []
+    profit_pool = 0.0
+    for o in filled:
+        price = float(o.filled_avg_price)
+        qty = float(o.filled_qty)
+        ts = o.filled_at.isoformat()
+        if o.side == OrderSide.BUY:
+            purchases.append({"price": price, "qty": qty, "order_id": str(o.id), "timestamp": ts})
+        else:
+            if not purchases:
+                logging.warning(f"Venta {o.id} sin compra previa en el historial reconstruido; se ignora para el pool.")
+                continue
+            lot = purchases.pop()
+            profit = (price - lot["price"]) * qty
+            if profit > 0:
+                profit_pool += profit
 
-    ok = True
-    if abs(local_qty - broker_qty) > 1e-4:
-        logging.critical(
-            f"DISCREPANCIA de posición para {symbol}: el estado local registra "
-            f"{local_qty:.6f} acciones, pero Alpaca reporta {broker_qty:.6f}. "
-            "El bot NO se iniciará. Revisa manualmente la cuenta de Alpaca y "
-            "el archivo de estado antes de reintentar."
-        )
-        ok = False
+    return purchases, round(profit_pool, 2)
 
+
+def reconcile_with_broker(trading_client, symbol: str, local_state: dict) -> dict | None:
+    """Verifica el estado local contra Alpaca. Si hay órdenes abiertas sin
+    resolver, no continúa (es ambiguo a qué lote pertenecen). Si la posición
+    real no coincide con el estado local, reconstruye purchases/profit_pool
+    desde el historial de órdenes y los adopta -- pero solo si esa
+    reconstrucción sí coincide con la posición real; si ni así coincide,
+    algo ajeno al bot tocó la cuenta (orden manual, etc.) y hace falta
+    revisión manual."""
     try:
         open_orders = trading_client.get_orders(
             filter=GetOrdersRequest(symbols=[symbol], status=QueryOrderStatus.OPEN)
         )
     except Exception:
         logging.exception(f"No se pudo verificar órdenes abiertas de {symbol}")
-        open_orders = []
+        return None
 
     if open_orders:
         ids = ", ".join(str(o.id) for o in open_orders)
@@ -88,9 +114,47 @@ def verify_broker_state(trading_client, symbol: str, purchases: list) -> bool:
             f"{symbol} (IDs: {ids}). El bot NO se iniciará para evitar duplicar "
             "órdenes. Resuélvelas manualmente en Alpaca antes de reintentar."
         )
-        ok = False
+        return None
 
-    return ok
+    try:
+        position = trading_client.get_open_position(symbol)
+        broker_qty = abs(float(position.qty))
+    except APIError:
+        broker_qty = 0.0
+
+    local_purchases = local_state.get("purchases", [])
+    local_qty = sum(p["qty"] for p in local_purchases)
+
+    if abs(local_qty - broker_qty) <= 1e-4:
+        return local_state
+
+    logging.warning(
+        f"DISCREPANCIA de posición para {symbol}: estado local {local_qty:.6f} "
+        f"acciones vs Alpaca {broker_qty:.6f}. Reconstruyendo estado desde el "
+        "historial de órdenes de Alpaca..."
+    )
+    purchases, profit_pool = rebuild_purchases_from_history(trading_client, symbol)
+    rebuilt_qty = sum(p["qty"] for p in purchases)
+
+    if abs(rebuilt_qty - broker_qty) > 1e-4:
+        logging.critical(
+            f"No se pudo reconciliar {symbol}: la reconstrucción desde el "
+            f"historial da {rebuilt_qty:.6f} acciones pero Alpaca reporta "
+            f"{broker_qty:.6f}. Puede haber operaciones manuales u órdenes "
+            "fuera del historial consultado. El bot NO se iniciará -- revisa "
+            "manualmente."
+        )
+        return None
+
+    logging.warning(
+        f"Estado reconstruido desde Alpaca: {len(purchases)} lote(s) activos, "
+        f"profit_pool=${profit_pool:.2f}. Reemplazando estado local previo "
+        f"({len(local_purchases)} lote(s))."
+    )
+    for i, p in enumerate(purchases):
+        logging.info(f"  [{i+1}] ${p['price']:.2f} | {p['qty']:.6f} acc | {p['timestamp']}")
+
+    return {"purchases": purchases, "profit_pool": profit_pool}
 
 
 def floor2(x: float) -> float:
@@ -263,10 +327,15 @@ def main():
     for i, p in enumerate(purchases):
         logging.info(f"  [{i+1}] ${p['price']:.2f} | {p['qty']:.6f} acc | {p['timestamp']}")
 
-    if not verify_broker_state(trading_client, symbol, purchases):
-        logging.error("Verificación contra Alpaca falló. Deteniendo el bot.")
+    reconciled = reconcile_with_broker(trading_client, symbol, state)
+    if reconciled is None:
+        logging.error("Verificación/reconciliación con Alpaca falló. Deteniendo el bot.")
         return
-    logging.info("Estado local verificado contra Alpaca: coincide.")
+    if reconciled is not state:
+        state = reconciled
+        save_state(state, state_file)
+    purchases = state["purchases"]
+    logging.info("Estado verificado/reconciliado contra Alpaca.")
 
     while True:
         try:
