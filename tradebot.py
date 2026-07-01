@@ -7,9 +7,10 @@ import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
+from alpaca.common.exceptions import APIError
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestTradeRequest
 
@@ -48,6 +49,48 @@ def save_state(state: dict, state_file: str):
             json.dump(state, f, indent=4, ensure_ascii=False)
     except Exception:
         logging.exception(f"Error al guardar estado en {state_file}")
+
+
+def verify_broker_state(trading_client, symbol: str, purchases: list) -> bool:
+    """Compara el estado local (purchases) contra la posición real y las
+    órdenes abiertas en Alpaca. Devuelve False si hay una discrepancia,
+    para evitar que el bot compre de nuevo sobre una posición que ya existe."""
+    local_qty = sum(p["qty"] for p in purchases)
+
+    try:
+        position = trading_client.get_open_position(symbol)
+        broker_qty = abs(float(position.qty))
+    except APIError:
+        broker_qty = 0.0
+
+    ok = True
+    if abs(local_qty - broker_qty) > 1e-4:
+        logging.critical(
+            f"DISCREPANCIA de posición para {symbol}: el estado local registra "
+            f"{local_qty:.6f} acciones, pero Alpaca reporta {broker_qty:.6f}. "
+            "El bot NO se iniciará. Revisa manualmente la cuenta de Alpaca y "
+            "el archivo de estado antes de reintentar."
+        )
+        ok = False
+
+    try:
+        open_orders = trading_client.get_orders(
+            filter=GetOrdersRequest(symbols=[symbol], status=QueryOrderStatus.OPEN)
+        )
+    except Exception:
+        logging.exception(f"No se pudo verificar órdenes abiertas de {symbol}")
+        open_orders = []
+
+    if open_orders:
+        ids = ", ".join(str(o.id) for o in open_orders)
+        logging.critical(
+            f"Hay {len(open_orders)} orden(es) abierta(s) sin resolver para "
+            f"{symbol} (IDs: {ids}). El bot NO se iniciará para evitar duplicar "
+            "órdenes. Resuélvelas manualmente en Alpaca antes de reintentar."
+        )
+        ok = False
+
+    return ok
 
 
 def floor2(x: float) -> float:
@@ -219,6 +262,11 @@ def main():
     logging.info(f"Estado cargado. Compras activas: {len(purchases)}")
     for i, p in enumerate(purchases):
         logging.info(f"  [{i+1}] ${p['price']:.2f} | {p['qty']:.6f} acc | {p['timestamp']}")
+
+    if not verify_broker_state(trading_client, symbol, purchases):
+        logging.error("Verificación contra Alpaca falló. Deteniendo el bot.")
+        return
+    logging.info("Estado local verificado contra Alpaca: coincide.")
 
     while True:
         try:
