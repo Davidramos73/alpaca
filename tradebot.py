@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import math
 import argparse
 import logging
 from datetime import datetime
@@ -47,6 +48,12 @@ def save_state(state: dict, state_file: str):
             json.dump(state, f, indent=4, ensure_ascii=False)
     except Exception:
         logging.exception(f"Error al guardar estado en {state_file}")
+
+
+def floor2(x: float) -> float:
+    """Trunca a 2 decimales sin redondear hacia arriba, para nunca pedir
+    más notional del disponible (Alpaca exige máximo 2 decimales)."""
+    return math.floor(x * 100 + 1e-6) / 100
 
 
 def get_latest_price(data_client, symbol: str):
@@ -237,8 +244,8 @@ def main():
                 logging.info("Sin compras registradas. Ejecutando compra inicial...")
                 free_slots = max_buys - len(purchases)
                 pool = state.get("profit_pool", 0.0)
-                bonus = pool / free_slots if free_slots > 0 else 0.0
-                effective_buy = buy_amount + bonus
+                bonus = floor2(pool / free_slots) if free_slots > 0 else 0.0
+                effective_buy = floor2(buy_amount + bonus)
                 if bonus > 0:
                     logging.info(f"Pool de ganancias: ${pool:.2f} | Bonus esta compra: ${bonus:.2f} | Total: ${effective_buy:.2f}")
                 buy_info = execute_buy(trading_client, symbol, effective_buy)
@@ -265,8 +272,8 @@ def main():
                     logging.info(f"¡Condición de COMPRA! ${current_price:.2f} <= ${buy_target:.2f}")
                     free_slots = max_buys - len(purchases)
                     pool = state.get("profit_pool", 0.0)
-                    bonus = pool / free_slots if free_slots > 0 else 0.0
-                    effective_buy = buy_amount + bonus
+                    bonus = floor2(pool / free_slots) if free_slots > 0 else 0.0
+                    effective_buy = floor2(buy_amount + bonus)
                     if bonus > 0:
                         logging.info(f"Pool de ganancias: ${pool:.2f} | Bonus esta compra: ${bonus:.2f} | Total: ${effective_buy:.2f}")
                     buy_info = execute_buy(trading_client, symbol, effective_buy)
