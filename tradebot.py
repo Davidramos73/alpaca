@@ -33,10 +33,12 @@ def load_state(state_file: str) -> dict:
                 state = json.load(f)
                 if "purchases" not in state:
                     state["purchases"] = []
+                if "profit_pool" not in state:
+                    state["profit_pool"] = 0.0
                 return state
         except Exception:
             logging.exception(f"Error al leer {state_file}. Se iniciará estado vacío.")
-    return {"purchases": []}
+    return {"purchases": [], "profit_pool": 0.0}
 
 
 def save_state(state: dict, state_file: str):
@@ -201,7 +203,9 @@ def main():
         logging.exception("Error al conectar con Alpaca")
         return
 
-    state_file = f"tradebot_{symbol}_state.json"
+    data_dir   = os.getenv("DATA_DIR", ".")
+    os.makedirs(data_dir, exist_ok=True)
+    state_file = os.path.join(data_dir, f"tradebot_{symbol}_state.json")
     state      = load_state(state_file)
     purchases  = state["purchases"]
 
@@ -231,11 +235,18 @@ def main():
 
             if len(purchases) == 0:
                 logging.info("Sin compras registradas. Ejecutando compra inicial...")
-                buy_info = execute_buy(trading_client, symbol, buy_amount)
+                free_slots = max_buys - len(purchases)
+                pool = state.get("profit_pool", 0.0)
+                bonus = pool / free_slots if free_slots > 0 else 0.0
+                effective_buy = buy_amount + bonus
+                if bonus > 0:
+                    logging.info(f"Pool de ganancias: ${pool:.2f} | Bonus esta compra: ${bonus:.2f} | Total: ${effective_buy:.2f}")
+                buy_info = execute_buy(trading_client, symbol, effective_buy)
                 if buy_info:
+                    state["profit_pool"] = pool - bonus
                     purchases.append(buy_info)
                     save_state(state, state_file)
-                    logging.info(f"Grid iniciado. Compra a ${buy_info['price']:.2f}")
+                    logging.info(f"Grid iniciado. Compra a ${buy_info['price']:.2f}. Pool restante: ${state['profit_pool']:.2f}")
                 else:
                     logging.error("Compra inicial FALLÓ. El grid no pudo iniciarse. Ver errores anteriores.")
                 time.sleep(interval)
@@ -246,17 +257,24 @@ def main():
             buy_target     = last_buy_price * (1.0 - buy_drop_pct)
             sell_target    = last_buy_price * (1.0 + sell_rise_pct)
 
-            logging.info(f"-> Última compra: ${last_buy_price:.2f} | Activas: {len(purchases)}/{max_buys}")
+            logging.info(f"-> Última compra: ${last_buy_price:.2f} | Activas: {len(purchases)}/{max_buys} | Pool: ${state.get('profit_pool', 0.0):.2f}")
             logging.info(f"-> Objetivo COMPRA: ${buy_target:.2f} | Objetivo VENTA: ${sell_target:.2f}")
 
             if current_price <= buy_target:
                 if len(purchases) < max_buys:
                     logging.info(f"¡Condición de COMPRA! ${current_price:.2f} <= ${buy_target:.2f}")
-                    buy_info = execute_buy(trading_client, symbol, buy_amount)
+                    free_slots = max_buys - len(purchases)
+                    pool = state.get("profit_pool", 0.0)
+                    bonus = pool / free_slots if free_slots > 0 else 0.0
+                    effective_buy = buy_amount + bonus
+                    if bonus > 0:
+                        logging.info(f"Pool de ganancias: ${pool:.2f} | Bonus esta compra: ${bonus:.2f} | Total: ${effective_buy:.2f}")
+                    buy_info = execute_buy(trading_client, symbol, effective_buy)
                     if buy_info:
+                        state["profit_pool"] = pool - bonus
                         purchases.append(buy_info)
                         save_state(state, state_file)
-                        logging.info(f"Compra registrada a ${buy_info['price']:.2f}. Activas: {len(purchases)}")
+                        logging.info(f"Compra registrada a ${buy_info['price']:.2f}. Activas: {len(purchases)}. Pool restante: ${state['profit_pool']:.2f}")
                     else:
                         logging.error("Compra grid FALLÓ. Estado NO modificado. Ver errores anteriores.")
                 else:
@@ -267,6 +285,14 @@ def main():
                 sell_info = execute_sell(trading_client, symbol, last_purchase["qty"])
                 if sell_info:
                     removed = purchases.pop()
+                    cost_basis = removed["price"] * sell_info["qty"]
+                    proceeds   = sell_info["price"] * sell_info["qty"]
+                    profit     = proceeds - cost_basis
+                    if profit > 0:
+                        state["profit_pool"] = state.get("profit_pool", 0.0) + profit
+                        logging.info(f"Ganancia de ${profit:.2f} sumada al pool. Pool total: ${state['profit_pool']:.2f}")
+                    else:
+                        logging.info(f"Venta sin ganancia neta (${profit:.2f}). Pool sin cambios: ${state.get('profit_pool', 0.0):.2f}")
                     save_state(state, state_file)
                     logging.info(f"Venta del lote a ${removed['price']:.2f} completada.")
                     if purchases:

@@ -9,4 +9,8 @@ RUN uv pip install --system --no-cache -r requirements.txt
 
 COPY tradebot.py .
 
+RUN mkdir /data
+ENV DATA_DIR=/data
+VOLUME ["/data"]
+
 CMD ["python", "-u", "tradebot.py"]

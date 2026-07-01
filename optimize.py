@@ -21,21 +21,27 @@ STARTING_CASH = 100_000.0
 # ---------------------------------------------------------------------------
 # Simulación (misma lógica que backtest.py, sin I/O)
 # ---------------------------------------------------------------------------
-def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float) -> dict:
-    cash       = STARTING_CASH
-    purchases  = []
-    total_buys = total_sells = 0
-    total_fees = 0.0
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT) -> dict:
+    cash        = STARTING_CASH
+    purchases   = []
+    profit_pool = 0.0
+    total_buys  = total_sells = 0
+    total_fees  = 0.0
 
     for _, row in df.iterrows():
         price = float(row["close"])
 
         if len(purchases) == 0:
-            qty     = BUY_AMOUNT / price
-            buy_fee = BUY_AMOUNT * fee_pct
-            cash   -= BUY_AMOUNT + buy_fee
+            free_slots    = max_buys - len(purchases)
+            bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
+            effective_buy = BUY_AMOUNT + bonus
+            qty     = effective_buy / price
+            buy_fee = effective_buy * fee_pct
+            cash   -= effective_buy + buy_fee
+            if use_pool:
+                profit_pool -= bonus
             total_fees += buy_fee
-            purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee})
+            purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
             total_buys += 1
             continue
 
@@ -45,11 +51,16 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
 
         if price <= buy_target:
             if len(purchases) < max_buys:
-                qty     = BUY_AMOUNT / price
-                buy_fee = BUY_AMOUNT * fee_pct
-                cash   -= BUY_AMOUNT + buy_fee
+                free_slots    = max_buys - len(purchases)
+                bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
+                effective_buy = BUY_AMOUNT + bonus
+                qty     = effective_buy / price
+                buy_fee = effective_buy * fee_pct
+                cash   -= effective_buy + buy_fee
+                if use_pool:
+                    profit_pool -= bonus
                 total_fees += buy_fee
-                purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee})
+                purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
                 total_buys += 1
 
         elif price >= sell_target:
@@ -59,6 +70,9 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             cash     += revenue - sell_fee
             total_fees += sell_fee
             total_sells += 1
+            profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
+            if use_pool and profit > 0:
+                profit_pool += profit
 
     final_price    = float(df.iloc[-1]["close"])
     holdings_value = sum(p["qty"] for p in purchases) * final_price
@@ -85,8 +99,12 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
 # ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Optimizador de estrategia grid")
-    parser.add_argument("--symbol", type=str, default="TSLA", help="Símbolo a analizar (default: TSLA)")
-    parser.add_argument("--fee-pct", type=float, default=0.0, help="Fee por operación sobre el monto (default: 0.0). Ej: 0.001 = 0.1%%")
+    parser.add_argument("--symbol",     type=str,   default="TSLA",       help="Símbolo a analizar (default: TSLA)")
+    parser.add_argument("--date-start", type=str,   default="2026-01-01", help="Fecha inicio YYYY-MM-DD (default: 2026-01-01)")
+    parser.add_argument("--date-end",   type=str,   default="2026-06-28", help="Fecha fin YYYY-MM-DD (default: 2026-06-28)")
+    parser.add_argument("--buy-amount", type=float, default=10_000.0,     help="Monto base por compra en USD (default: 10000)")
+    parser.add_argument("--fee-pct",    type=float, default=0.0,          help="Fee por operación sobre el monto (default: 0.0). Ej: 0.001 = 0.1%%")
+    parser.add_argument("--no-profit-pool", action="store_true",          help="Desactivar reinversión de ganancias (modo clásico)")
     args = parser.parse_args()
 
     load_dotenv()
@@ -98,8 +116,8 @@ def main():
 
     # --- Descargar datos una sola vez (caché por símbolo y período) ---
     symbol     = args.symbol.upper()
-    date_start = datetime(2026, 1, 1)
-    date_end   = datetime(2026, 6, 28)
+    date_start = datetime.strptime(args.date_start, "%Y-%m-%d")
+    date_end   = datetime.strptime(args.date_end,   "%Y-%m-%d")
     cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}.pkl"
 
     if os.path.exists(cache_path):
@@ -124,14 +142,16 @@ def main():
     # --- Grid search ---
     combos = list(itertools.product(BUY_DROP_RANGE, SELL_RISE_RANGE))
     total  = len(combos)
-    fee_pct = args.fee_pct
-    print(f"Evaluando {total} combinaciones (max_buys fijo = {MAX_BUYS}, fee = {fee_pct*100:.3f}%)…\n")
+    fee_pct    = args.fee_pct
+    buy_amount = args.buy_amount
+    use_pool   = not args.no_profit_pool
+    print(f"Evaluando {total} combinaciones (max_buys fijo = {MAX_BUYS}, buy_amount = ${buy_amount:,.0f}, fee = {fee_pct*100:.3f}%, pool = {'ON' if use_pool else 'OFF'})…\n")
 
     results = []
     for i, (buy_drop, sell_rise) in enumerate(combos, 1):
         if i % 10 == 0 or i == total:
             print(f"  {i}/{total}", end="\r")
-        results.append(simulate(df, MAX_BUYS, buy_drop, sell_rise, fee_pct))
+        results.append(simulate(df, MAX_BUYS, buy_drop, sell_rise, fee_pct, use_pool, buy_amount))
 
     # --- Resultados ---
     results.sort(key=lambda r: r["roi"], reverse=True)
@@ -176,7 +196,7 @@ def main():
         f"  Período analizado:  {periodo_start}  →  {periodo_end}",
         f"  Precio {symbol} inicio: ${precio_inicio:.2f}   |   Precio {symbol} fin: ${precio_fin:.2f}",
         f"  Horas de trading:   {len(df)}",
-        f"  Capital inicial:    ${STARTING_CASH:,.2f}   |   Monto por compra: ${BUY_AMOUNT:,.2f}",
+        f"  Capital inicial:    ${STARTING_CASH:,.2f}   |   Monto por compra: ${buy_amount:,.2f}",
         f"  max_buys (fijo):    {MAX_BUYS}",
         f"  Combinaciones evaluadas: {total}  "
         f"(drop 1-10% × rise 1-10%)",
