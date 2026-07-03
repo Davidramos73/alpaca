@@ -21,7 +21,7 @@ STARTING_CASH = 100_000.0
 # ---------------------------------------------------------------------------
 # Simulación (misma lógica que backtest.py, sin I/O)
 # ---------------------------------------------------------------------------
-def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT) -> dict:
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1) -> dict:
     cash        = STARTING_CASH
     purchases   = []
     profit_pool = 0.0
@@ -81,6 +81,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
     roi            = (profit / STARTING_CASH) * 100
 
     return {
+        "interval_minutes": interval_minutes,
         "max_buys":       max_buys,
         "buy_drop_pct":   buy_drop_pct,
         "sell_rise_pct":  sell_rise_pct,
@@ -105,6 +106,7 @@ def main():
     parser.add_argument("--buy-amount", type=float, default=10_000.0,     help="Monto base por compra en USD (default: 10000)")
     parser.add_argument("--fee-pct",    type=float, default=0.0,          help="Fee por operación sobre el monto (default: 0.0). Ej: 0.001 = 0.1%%")
     parser.add_argument("--no-profit-pool", action="store_true",          help="Desactivar reinversión de ganancias (modo clásico)")
+    parser.add_argument("--intervals",  type=str,   default="20",         help="Lista de intervalos de revisión en minutos, separados por coma (default: 20). Ej: 1,5,15,20,30,60,120")
     args = parser.parse_args()
 
     load_dotenv()
@@ -118,40 +120,48 @@ def main():
     symbol     = args.symbol.upper()
     date_start = datetime.strptime(args.date_start, "%Y-%m-%d")
     date_end   = datetime.strptime(args.date_end,   "%Y-%m-%d")
-    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}.pkl"
+    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}_1Min.pkl"
 
     if os.path.exists(cache_path):
         print(f"Cargando datos desde caché ({cache_path})…")
-        df = pd.read_pickle(cache_path)
+        df_1min = pd.read_pickle(cache_path)
     else:
-        print(f"Descargando datos históricos de Alpaca para {symbol}…")
+        print(f"Descargando datos históricos (1 minuto) de Alpaca para {symbol}…")
         client = StockHistoricalDataClient(api_key, secret_key)
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Hour,
+            timeframe=TimeFrame.Minute,
             start=date_start,
             end=date_end,
         )
-        bars = client.get_stock_bars(req)
-        df   = bars.df.reset_index()
-        df.to_pickle(cache_path)
+        bars    = client.get_stock_bars(req)
+        df_1min = bars.df.reset_index()
+        df_1min.to_pickle(cache_path)
         print(f"Datos guardados en caché ({cache_path})")
 
-    print(f"Horas de trading cargadas: {len(df)}\n")
+    print(f"Velas de 1 minuto cargadas: {len(df_1min)}\n")
+
+    intervals = sorted({max(1, int(v.strip())) for v in args.intervals.split(",") if v.strip()})
 
     # --- Grid search ---
     combos = list(itertools.product(BUY_DROP_RANGE, SELL_RISE_RANGE))
-    total  = len(combos)
+    total_per_interval = len(combos)
+    total = total_per_interval * len(intervals)
     fee_pct    = args.fee_pct
     buy_amount = args.buy_amount
     use_pool   = not args.no_profit_pool
-    print(f"Evaluando {total} combinaciones (max_buys fijo = {MAX_BUYS}, buy_amount = ${buy_amount:,.0f}, fee = {fee_pct*100:.3f}%, pool = {'ON' if use_pool else 'OFF'})…\n")
+    print(f"Evaluando {total_per_interval} combinaciones x {len(intervals)} intervalo(s) {intervals} min "
+          f"(max_buys fijo = {MAX_BUYS}, buy_amount = ${buy_amount:,.0f}, fee = {fee_pct*100:.3f}%, pool = {'ON' if use_pool else 'OFF'})…\n")
 
     results = []
-    for i, (buy_drop, sell_rise) in enumerate(combos, 1):
-        if i % 10 == 0 or i == total:
-            print(f"  {i}/{total}", end="\r")
-        results.append(simulate(df, MAX_BUYS, buy_drop, sell_rise, fee_pct, use_pool, buy_amount))
+    done = 0
+    for interval_minutes in intervals:
+        df = df_1min.iloc[::interval_minutes].reset_index(drop=True)
+        for buy_drop, sell_rise in combos:
+            done += 1
+            if done % 10 == 0 or done == total:
+                print(f"  {done}/{total}", end="\r")
+            results.append(simulate(df, MAX_BUYS, buy_drop, sell_rise, fee_pct, use_pool, buy_amount, interval_minutes))
 
     # --- Resultados ---
     results.sort(key=lambda r: r["roi"], reverse=True)
@@ -161,24 +171,31 @@ def main():
     log_path  = f"optimize_{symbol}_{run_ts}.log"
     csv_path  = f"optimize_{symbol}_{run_ts}.csv"
 
-    periodo_start = df.iloc[0]["timestamp"].strftime("%Y-%m-%d")
-    periodo_end   = df.iloc[-1]["timestamp"].strftime("%Y-%m-%d")
-    precio_inicio = float(df.iloc[0]["close"])
-    precio_fin    = float(df.iloc[-1]["close"])
+    periodo_start = df_1min.iloc[0]["timestamp"].strftime("%Y-%m-%d")
+    periodo_end   = df_1min.iloc[-1]["timestamp"].strftime("%Y-%m-%d")
+    precio_inicio = float(df_1min.iloc[0]["close"])
+    precio_fin    = float(df_1min.iloc[-1]["close"])
     best          = results[0]
     worst         = results[-1]
+
+    best_by_interval = {}
+    for r in results:
+        m = r["interval_minutes"]
+        if m not in best_by_interval or r["roi"] > best_by_interval[m]["roi"]:
+            best_by_interval[m] = r
 
     sep  = "=" * 80
     sep2 = "-" * 80
 
     header_row = (
-        f"{'#':>3}  {'drop%':>6}  {'rise%':>6}  {'ROI%':>8}  "
+        f"{'#':>3}  {'min':>5}  {'drop%':>6}  {'rise%':>6}  {'ROI%':>8}  "
         f"{'Ganancia':>12}  {'Capital':>12}  {'Compras':>7}  {'Ventas':>6}  {'Open':>5}"
     )
 
     def fmt_row(rank, r):
         return (
             f"{rank:>3}  "
+            f"{r['interval_minutes']:>5}  "
             f"{r['buy_drop_pct']*100:>5.0f}%  "
             f"{r['sell_rise_pct']*100:>5.0f}%  "
             f"{r['roi']:>+8.2f}%  "
@@ -195,14 +212,27 @@ def main():
         sep,
         f"  Período analizado:  {periodo_start}  →  {periodo_end}",
         f"  Precio {symbol} inicio: ${precio_inicio:.2f}   |   Precio {symbol} fin: ${precio_fin:.2f}",
-        f"  Horas de trading:   {len(df)}",
+        f"  Velas de 1 minuto:  {len(df_1min)}",
+        f"  Intervalos evaluados (min): {intervals}",
         f"  Capital inicial:    ${STARTING_CASH:,.2f}   |   Monto por compra: ${buy_amount:,.2f}",
         f"  max_buys (fijo):    {MAX_BUYS}",
         f"  Combinaciones evaluadas: {total}  "
-        f"(drop 1-10% × rise 1-10%)",
+        f"({total_per_interval} combos drop/rise x {len(intervals)} intervalo(s))",
         sep,
         "",
-        f"  TOP {top_n} COMBINACIONES (ordenadas por ROI)",
+        f"  MEJOR COMBINACIÓN POR INTERVALO (ordenado por ROI)",
+        sep2,
+        header_row,
+        sep2,
+    ]
+
+    for rank, m in enumerate(sorted(best_by_interval, key=lambda m: best_by_interval[m]["roi"], reverse=True), 1):
+        lines.append(fmt_row(rank, best_by_interval[m]))
+
+    lines += [
+        sep2,
+        "",
+        f"  TOP {top_n} COMBINACIONES GLOBALES (ordenadas por ROI)",
         sep2,
         header_row,
         sep2,
@@ -216,6 +246,7 @@ def main():
         "",
         "  MEJOR COMBINACIÓN",
         sep2,
+        f"  intervalo     : {best['interval_minutes']} min",
         f"  buy_drop_pct  : {best['buy_drop_pct']*100:.0f}%",
         f"  sell_rise_pct : {best['sell_rise_pct']*100:.0f}%",
         f"  ROI           : {best['roi']:+.2f}%",
@@ -226,6 +257,7 @@ def main():
         "",
         "  PEOR COMBINACIÓN",
         sep2,
+        f"  intervalo     : {worst['interval_minutes']} min",
         f"  buy_drop_pct  : {worst['buy_drop_pct']*100:.0f}%",
         f"  sell_rise_pct : {worst['sell_rise_pct']*100:.0f}%",
         f"  ROI           : {worst['roi']:+.2f}%",

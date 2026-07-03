@@ -18,6 +18,7 @@ def main():
     parser.add_argument("--sell-rise-pct", type=float, default=0.04, help="Porcentaje de subida para venta (default: 0.04 = 4%%)")
     parser.add_argument("--fee-pct", type=float, default=0.0, help="Fee por operación sobre el monto (default: 0.0). Ej: 0.001 = 0.1%%")
     parser.add_argument("--no-profit-pool", action="store_true", help="Desactivar reinversión de ganancias (modo clásico)")
+    parser.add_argument("--interval-minutes", type=int, default=20, help="Cada cuántos minutos 'revisa' el precio el bot simulado, igual que el parámetro --interval del bot real (default: 20)")
     args = parser.parse_args()
 
     # Cargar variables de entorno
@@ -34,7 +35,7 @@ def main():
     symbol     = args.symbol.upper()
     date_start = datetime.strptime(args.date_start, "%Y-%m-%d")
     date_end   = datetime.strptime(args.date_end,   "%Y-%m-%d")
-    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}.pkl"
+    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}_1Min.pkl"
 
     print(f"Iniciando simulación (Backtest) de {symbol}…")
     print(f"Rango: {date_start.strftime('%Y-%m-%d')} al {date_end.strftime('%Y-%m-%d')}")
@@ -43,11 +44,11 @@ def main():
         print(f"Cargando datos desde caché ({cache_path})…")
         df = pd.read_pickle(cache_path)
     else:
-        print(f"Descargando datos históricos de Alpaca para {symbol}…")
+        print(f"Descargando datos históricos (1 minuto) de Alpaca para {symbol}…")
         client = StockHistoricalDataClient(api_key, secret_key)
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Hour,
+            timeframe=TimeFrame.Minute,
             start=date_start,
             end=date_end,
         )
@@ -60,8 +61,12 @@ def main():
             print(f"Error al obtener datos históricos: {e}")
             return
 
-    print(f"Datos listos. Total de horas de trading analizadas: {len(df)}")
-    
+    print(f"Datos descargados: {len(df)} velas de 1 minuto.")
+
+    interval_minutes = max(1, args.interval_minutes)
+    df = df.iloc[::interval_minutes].reset_index(drop=True)
+    print(f"Simulando con intervalo de revisión de {interval_minutes} minuto(s): {len(df)} precios evaluados.")
+
     # 2. Configuración de parámetros de la estrategia
     starting_cash = 100000.0
     cash = starting_cash
