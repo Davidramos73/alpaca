@@ -288,3 +288,46 @@ def test_run_analysis_pipeline_completo():
     assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
     assert 0.01 <= out["stats"]["median_drop"] <= 0.10
     assert isinstance(out["veredicto"], str) and len(out["veredicto"]) > 0
+
+    # Con esta semilla (rng=11) el torneo real da:
+    #   fija-mediana +5.72%  wf-pico +6.13%  wf-meseta +5.08%  oraculo +7.36%
+    # es decir wf-pico le gana a fija-mediana -> rama "SE JUSTIFICA", nombrando
+    # a WF-pico como la estrategia adaptativa ganadora. Verificamos el texto de
+    # la rama Y que sea consistente con los ROI reales de out["torneo"]: si un
+    # bug invirtiera el operador de comparación o mezclara qué ROI se compara
+    # con cuál, esta aserción lo detectaría.
+    assert "EL AUTO-AJUSTE SE JUSTIFICA" in out["veredicto"]
+    assert "WF-pico" in out["veredicto"]
+    assert out["torneo"]["wf-pico"]["roi"] > out["torneo"]["fija-mediana"]["roi"]
+    assert out["torneo"]["wf-pico"]["roi"] >= out["torneo"]["wf-meseta"]["roi"]
+
+
+def test_run_analysis_veredicto_no_se_justifica_cuando_fija_empata_adaptativas():
+    # Para forzar la rama "NO SE JUSTIFICA" replicamos EXACTAMENTE la misma
+    # semana (misma serie de precios) 3 veces. Con datos idénticos, el pico
+    # óptimo de cada semana es idéntico, así que wf-pico/wf-meseta (que usan
+    # los parámetros óptimos de la semana anterior) terminan aplicando los
+    # mismos parámetros que fija-mediana (la mediana de picos idénticos es
+    # ese mismo pico) sobre datos idénticos -> empatan en ROI. Como la
+    # condición de "justifica" es un ">" estricto, un empate cae en la rama
+    # "NO SE JUSTIFICA". Verificado ejecutando el pipeline (ver reporte).
+    rng = np.random.default_rng(5)
+    n_bars = 40
+    n_semanas = 3
+    base_prices = 100 * np.cumprod(1 + rng.normal(0, 0.01, n_bars))
+    lunes = pd.date_range("2026-01-05", periods=n_semanas, freq="7D")
+    partes = [make_df(base_prices, start=lunes[i].strftime("%Y-%m-%d 15:00")) for i in range(n_semanas)]
+    df = pd.concat(partes, ignore_index=True)
+
+    out = run_analysis(df, intervals=[1], train_weeks=1, fee_pct=0.0, use_pool=True, buy_amount=10_000.0)
+
+    assert len(out["weekly"]) == 3
+    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+
+    # Con esta semilla y semanas idénticas, el torneo real da un empate
+    # exacto: fija-mediana == wf-pico == wf-meseta == oraculo (~-0.04% ROI)
+    # -> rama "NO SE JUSTIFICA". Verificamos el texto de la rama Y que sea
+    # consistente con los ROI reales de out["torneo"].
+    assert "EL AUTO-AJUSTE NO SE JUSTIFICA" in out["veredicto"]
+    assert out["torneo"]["fija-mediana"]["roi"] >= out["torneo"]["wf-pico"]["roi"]
+    assert out["torneo"]["fija-mediana"]["roi"] >= out["torneo"]["wf-meseta"]["roi"]
