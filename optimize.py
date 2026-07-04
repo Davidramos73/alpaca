@@ -117,6 +117,28 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
     }
 
 # ---------------------------------------------------------------------------
+# Carga de datos históricos (con caché en disco)
+# ---------------------------------------------------------------------------
+def load_bars(symbol: str, date_start: datetime, date_end: datetime, api_key: str, secret_key: str) -> pd.DataFrame:
+    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}_1Min.pkl"
+    if os.path.exists(cache_path):
+        print(f"Cargando datos desde caché ({cache_path})…")
+        return pd.read_pickle(cache_path)
+
+    print(f"Descargando datos históricos (1 minuto) de Alpaca para {symbol}…")
+    client = StockHistoricalDataClient(api_key, secret_key)
+    req = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame.Minute,
+        start=date_start,
+        end=date_end,
+    )
+    df = client.get_stock_bars(req).df.reset_index()
+    df.to_pickle(cache_path)
+    print(f"Datos guardados en caché ({cache_path})")
+    return df
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -141,24 +163,7 @@ def main():
     symbol     = args.symbol.upper()
     date_start = datetime.strptime(args.date_start, "%Y-%m-%d")
     date_end   = datetime.strptime(args.date_end,   "%Y-%m-%d")
-    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}_1Min.pkl"
-
-    if os.path.exists(cache_path):
-        print(f"Cargando datos desde caché ({cache_path})…")
-        df_1min = pd.read_pickle(cache_path)
-    else:
-        print(f"Descargando datos históricos (1 minuto) de Alpaca para {symbol}…")
-        client = StockHistoricalDataClient(api_key, secret_key)
-        req = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
-            start=date_start,
-            end=date_end,
-        )
-        bars    = client.get_stock_bars(req)
-        df_1min = bars.df.reset_index()
-        df_1min.to_pickle(cache_path)
-        print(f"Datos guardados en caché ({cache_path})")
+    df_1min    = load_bars(symbol, date_start, date_end, api_key, secret_key)
 
     print(f"Velas de 1 minuto cargadas: {len(df_1min)}\n")
 

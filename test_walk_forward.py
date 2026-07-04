@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from optimize import simulate, new_state, MAX_BUYS
+from walk_forward import split_weeks
 
 
 def make_df(prices, start="2026-01-05 14:30", freq="1min"):
@@ -55,3 +56,22 @@ def test_simulate_usa_buy_amount():
     df = make_df([100.0])
     r = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, buy_amount=5_000.0)
     assert r["state"]["cash"] == pytest.approx(95_000.0)
+
+
+def test_split_weeks_semanas_iso_y_huecos():
+    # Vie 2026-01-09 (W02), Lun/Mar 2026-01-12/13 (W03), hueco, Mié 2026-01-21 (W04)
+    partes = [
+        make_df([100] * 10, start="2026-01-09 15:00"),
+        make_df([100] * 20, start="2026-01-12 15:00"),
+        make_df([100] * 15, start="2026-01-13 15:00"),
+        make_df([100] * 5,  start="2026-01-21 15:00"),
+    ]
+    df = pd.concat(partes, ignore_index=True)
+    weeks = split_weeks(df)
+
+    assert [w["label"] for w in weeks] == ["2026-W02", "2026-W03", "2026-W04"]
+    assert [len(w["df"]) for w in weeks] == [10, 35, 5]
+    assert weeks[0]["start"] == df["timestamp"].iloc[0]
+    assert weeks[2]["end"] == df["timestamp"].iloc[-1]
+    # cada df semanal viene con índice reseteado
+    assert list(weeks[1]["df"].index) == list(range(35))
