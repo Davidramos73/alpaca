@@ -62,3 +62,34 @@ def select_plateau(results: list[dict]) -> tuple[dict, float]:
         if score > mejor_score:
             mejor, mejor_score = r, score
     return mejor, mejor_score
+
+
+def lag1_corr(values: list[float]) -> float:
+    s = pd.Series(values, dtype=float)
+    if len(s) < 3 or s.iloc[:-1].std() == 0 or s.iloc[1:].std() == 0:
+        return float("nan")
+    return float(s.corr(s.shift(1)))
+
+
+def median_params(past_peaks: list[dict]) -> tuple[float, float, int]:
+    drop = round(float(np.median([p["buy_drop_pct"] for p in past_peaks])) * 100) / 100
+    rise = round(float(np.median([p["sell_rise_pct"] for p in past_peaks])) * 100) / 100
+    interval = int(pd.Series([p["interval_minutes"] for p in past_peaks]).mode().iloc[0])
+    return drop, rise, interval
+
+
+def regret_series(weekly: list[dict], fee_pct: float, use_pool: bool, buy_amount: float) -> list[dict]:
+    rows = []
+    for i in range(1, len(weekly)):
+        prev = weekly[i - 1]["peak"]
+        d, r, m = prev["buy_drop_pct"], prev["sell_rise_pct"], prev["interval_minutes"]
+        sub = weekly[i]["wk"]["df"].iloc[::m].reset_index(drop=True)
+        applied = simulate(sub, MAX_BUYS, d, r, fee_pct, use_pool, buy_amount, m)
+        own = weekly[i]["peak"]["roi"]
+        rows.append({
+            "label":       weekly[i]["wk"]["label"],
+            "own_roi":     own,
+            "applied_roi": applied["roi"],
+            "regret":      own - applied["roi"],
+        })
+    return rows

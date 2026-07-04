@@ -3,7 +3,15 @@ import pandas as pd
 import pytest
 
 from optimize import simulate, new_state, MAX_BUYS
-from walk_forward import run_grid, select_peak, select_plateau, split_weeks
+from walk_forward import (
+    lag1_corr,
+    median_params,
+    regret_series,
+    run_grid,
+    select_peak,
+    select_plateau,
+    split_weeks,
+)
 
 
 def make_df(prices, start="2026-01-05 14:30", freq="1min"):
@@ -126,3 +134,52 @@ def test_run_grid_dimensiones_y_mejor_roi():
     assert len(results) == 100 * 2          # 10 drops x 10 rises x 2 intervalos
     peak = select_peak(results)
     assert peak["roi"] == max(r["roi"] for r in results)
+
+
+def test_lag1_corr():
+    assert lag1_corr([1, 2, 3, 4, 5]) == pytest.approx(1.0)
+    assert np.isnan(lag1_corr([5, 5, 5, 5]))      # varianza cero
+    assert np.isnan(lag1_corr([1.0, 2.0]))        # muestra insuficiente
+
+
+def test_median_params():
+    peaks = [
+        _combo(3, 2, 1.0, interval=20),
+        _combo(5, 6, 1.0, interval=20),
+        _combo(4, 10, 1.0, interval=5),
+    ]
+    drop, rise, interval = median_params(peaks)
+    assert drop == pytest.approx(0.04)
+    assert rise == pytest.approx(0.06)
+    assert interval == 20
+
+
+def _weekly_sintetico(n_semanas=2, bars=80):
+    rng = np.random.default_rng(7)
+    weekly = []
+    lunes = pd.date_range("2026-01-05", periods=n_semanas, freq="7D")
+    for i in range(n_semanas):
+        prices = 100 * np.cumprod(1 + rng.normal(0, 0.01, bars))
+        df = make_df(prices, start=lunes[i].strftime("%Y-%m-%d 15:00"))
+        results = run_grid(df, [1], 0.0, True, 10_000.0)
+        plateau, score = select_plateau(results)
+        weekly.append({
+            "wk": {"label": f"2026-W{2 + i:02d}", "start": df["timestamp"].iloc[0],
+                   "end": df["timestamp"].iloc[-1], "df": df},
+            "results": results,
+            "peak": select_peak(results),
+            "plateau": plateau,
+            "plateau_score": score,
+        })
+    return weekly
+
+
+def test_regret_nunca_negativo():
+    # El combo aplicado sale del mismo grid que define el óptimo propio,
+    # así que own_roi >= applied_roi siempre.
+    weekly = _weekly_sintetico()
+    rows = regret_series(weekly, 0.0, True, 10_000.0)
+    assert len(rows) == 1
+    assert rows[0]["label"] == "2026-W03"
+    assert rows[0]["own_roi"] == pytest.approx(weekly[1]["peak"]["roi"])
+    assert rows[0]["regret"] >= -1e-9
