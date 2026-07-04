@@ -1,8 +1,9 @@
+import numpy as np
 import pandas as pd
 import pytest
 
 from optimize import simulate, new_state, MAX_BUYS
-from walk_forward import split_weeks
+from walk_forward import run_grid, select_peak, select_plateau, split_weeks
 
 
 def make_df(prices, start="2026-01-05 14:30", freq="1min"):
@@ -75,3 +76,53 @@ def test_split_weeks_semanas_iso_y_huecos():
     assert weeks[2]["end"] == df["timestamp"].iloc[-1]
     # cada df semanal viene con índice reseteado
     assert list(weeks[1]["df"].index) == list(range(35))
+
+
+def _combo(drop_pp, rise_pp, roi, interval=20):
+    return {
+        "interval_minutes": interval,
+        "buy_drop_pct":  drop_pp / 100,
+        "sell_rise_pct": rise_pp / 100,
+        "roi": roi,
+    }
+
+
+def test_select_plateau_prefiere_meseta_sobre_pico_aislado():
+    # Grid 10x10: base 0, meseta de 5.0 en drop/rise 2..4, pico aislado de 10.0 en (9,9)
+    results = []
+    for d in range(1, 11):
+        for r in range(1, 11):
+            if 2 <= d <= 4 and 2 <= r <= 4:
+                roi = 5.0
+            elif d == 9 and r == 9:
+                roi = 10.0
+            else:
+                roi = 0.0
+            results.append(_combo(d, r, roi))
+
+    assert select_peak(results)["buy_drop_pct"] == pytest.approx(0.09)
+
+    plateau, score = select_plateau(results)
+    assert plateau["buy_drop_pct"] == pytest.approx(0.03)
+    assert plateau["sell_rise_pct"] == pytest.approx(0.03)
+    assert score == pytest.approx(5.0)   # los 9 vecinos de (3,3) valen 5.0
+
+
+def test_select_plateau_no_mezcla_intervalos():
+    # Mismo drop/rise, distinto intervalo: los vecindarios son independientes
+    results = [_combo(3, 3, 5.0, interval=20), _combo(3, 3, 9.0, interval=60)]
+    plateau, score = select_plateau(results)
+    assert plateau["interval_minutes"] == 60
+    assert score == pytest.approx(9.0)
+
+
+def test_run_grid_dimensiones_y_mejor_roi():
+    # 60 velas de random walk determinístico
+    rng = np.random.default_rng(42)
+    prices = 100 * np.cumprod(1 + rng.normal(0, 0.01, 60))
+    df = make_df(prices)
+
+    results = run_grid(df, [1, 5], 0.0, True, 10_000.0)
+    assert len(results) == 100 * 2          # 10 drops x 10 rises x 2 intervalos
+    peak = select_peak(results)
+    assert peak["roi"] == max(r["roi"] for r in results)
