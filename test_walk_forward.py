@@ -239,3 +239,33 @@ def test_tournament_estructura_y_semanas_de_aplicacion():
     assert planes["oraculo"][1][0] == weekly[2]["peak"]["buy_drop_pct"]
     for r in resultados.values():
         assert "roi" in r and "total_equity" in r
+
+
+def test_tournament_train_weeks_mayor_a_uno_usa_ventana_correcta():
+    # 4 semanas, train_weeks=2 -> 2 semanas de aplicación (i=2, i=3).
+    # Para wf-pico/wf-meseta con train_weeks>1, tournament() debe concatenar
+    # EXACTAMENTE las train_weeks semanas previas (range(i - train_weeks, i))
+    # y correr run_grid de nuevo sobre esa concatenación. Reconstruimos aquí,
+    # de forma independiente, la ventana correcta para la primera semana de
+    # aplicación (i=2 -> semanas [0, 1]) y comparamos el resultado exacto de
+    # planes["wf-pico"][0]. Un off-by-one en el rango (p.ej.
+    # range(i - train_weeks + 1, i), que concatenaría solo la semana 1) casi
+    # seguro produce un pico distinto sobre datos sintéticos aleatorios, así
+    # que este test lo detectaría.
+    weekly = _weekly_sintetico(n_semanas=4)
+    resultados, planes = tournament(weekly, 2, [1], 0.0, True, 10_000.0)
+
+    assert set(resultados) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    assert all(len(p) == len(weekly) - 2 for p in planes.values())
+
+    ventana_correcta = pd.concat(
+        [weekly[0]["wk"]["df"], weekly[1]["wk"]["df"]],
+        ignore_index=True,
+    )
+    resultados_ventana = run_grid(ventana_correcta, [1], 0.0, True, 10_000.0)
+    pico_esperado = select_peak(resultados_ventana)
+    esperado = (pico_esperado["buy_drop_pct"],
+                pico_esperado["sell_rise_pct"],
+                pico_esperado["interval_minutes"])
+
+    assert planes["wf-pico"][0] == esperado
