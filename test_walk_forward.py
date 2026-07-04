@@ -1,3 +1,7 @@
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -331,3 +335,30 @@ def test_run_analysis_veredicto_no_se_justifica_cuando_fija_empata_adaptativas()
     assert "EL AUTO-AJUSTE NO SE JUSTIFICA" in out["veredicto"]
     assert out["torneo"]["fija-mediana"]["roi"] >= out["torneo"]["wf-pico"]["roi"]
     assert out["torneo"]["fija-mediana"]["roi"] >= out["torneo"]["wf-meseta"]["roi"]
+
+
+@pytest.mark.parametrize("train_weeks", ["0", "-3"])
+def test_cli_train_weeks_menor_a_uno_falla_limpio_sin_traceback(train_weeks):
+    # Antes de la validación agregada en main(), --train-weeks 0 (o negativo)
+    # NO era rechazado por argparse ni por el guard de run_analysis()
+    # (len(weeks) <= train_weeks + 1), y terminaba crasheando mucho más abajo
+    # en median_params()/np.median([]) con un ValueError crudo ("cannot
+    # convert float NaN to integer") en cuanto tournament() intentaba
+    # calcular fija-mediana para la primera semana de aplicación con cero
+    # semanas de entrenamiento. La validación vive en main() justo después de
+    # parser.parse_args(), antes de load_dotenv()/load_bars(), así que este
+    # subprocess nunca llega a tocar red ni caché: debe fallar de inmediato
+    # con el mensaje de argparse (parser.error, exit code 2), no con un
+    # traceback de Python.
+    script = Path(__file__).resolve().parent / "walk_forward.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--train-weeks", train_weeks],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 2
+    assert "--train-weeks debe ser >= 1" in proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert "ValueError" not in proc.stderr

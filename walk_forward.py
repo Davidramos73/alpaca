@@ -286,6 +286,9 @@ def main():
     parser.add_argument("--train-weeks", type=int,   default=1, help="Semanas previas usadas para optimizar (default: 1)")
     args = parser.parse_args()
 
+    if args.train_weeks < 1:
+        parser.error("--train-weeks debe ser >= 1")
+
     load_dotenv()
     api_key    = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_SECRET_KEY")
