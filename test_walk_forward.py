@@ -7,6 +7,7 @@ from walk_forward import (
     lag1_corr,
     median_params,
     regret_series,
+    run_analysis,
     run_grid,
     select_peak,
     select_plateau,
@@ -269,3 +270,21 @@ def test_tournament_train_weeks_mayor_a_uno_usa_ventana_correcta():
                 pico_esperado["interval_minutes"])
 
     assert planes["wf-pico"][0] == esperado
+
+
+def test_run_analysis_pipeline_completo():
+    rng = np.random.default_rng(11)
+    partes = []
+    lunes = pd.date_range("2026-01-05", periods=4, freq="7D")
+    for i in range(4):
+        prices = 100 * np.cumprod(1 + rng.normal(0, 0.01, 80))
+        partes.append(make_df(prices, start=lunes[i].strftime("%Y-%m-%d 15:00")))
+    df = pd.concat(partes, ignore_index=True)
+
+    out = run_analysis(df, intervals=[1], train_weeks=1, fee_pct=0.0, use_pool=True, buy_amount=10_000.0)
+
+    assert len(out["weekly"]) == 4
+    assert len(out["regret"]) == 3
+    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    assert 0.01 <= out["stats"]["median_drop"] <= 0.10
+    assert isinstance(out["veredicto"], str) and len(out["veredicto"]) > 0
