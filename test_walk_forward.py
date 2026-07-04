@@ -10,7 +10,9 @@ from walk_forward import (
     run_grid,
     select_peak,
     select_plateau,
+    simulate_adaptive,
     split_weeks,
+    tournament,
 )
 
 
@@ -203,3 +205,37 @@ def test_regret_nunca_negativo():
     assert rows[0]["label"] == "2026-W03"
     assert rows[0]["own_roi"] == pytest.approx(weekly[1]["peak"]["roi"])
     assert rows[0]["regret"] >= -1e-9
+
+
+def test_simulate_adaptive_params_constantes_equivale_a_simulate():
+    rng = np.random.default_rng(3)
+    prices = 100 * np.cumprod(1 + rng.normal(0, 0.01, 120))
+    df = make_df(prices)
+    semanas = [df.iloc[:40].reset_index(drop=True),
+               df.iloc[40:90].reset_index(drop=True),
+               df.iloc[90:].reset_index(drop=True)]
+
+    completo = simulate(df, MAX_BUYS, 0.03, 0.02, 0.0)
+    adaptado = simulate_adaptive(semanas, [(0.03, 0.02, 1)] * 3, 0.0, True, 10_000.0)
+
+    assert adaptado["total_equity"] == pytest.approx(completo["total_equity"])
+    assert adaptado["buys"] == completo["buys"]
+    assert adaptado["sells"] == completo["sells"]
+
+
+def test_tournament_estructura_y_semanas_de_aplicacion():
+    weekly = _weekly_sintetico(n_semanas=3)
+    resultados, planes = tournament(weekly, 1, [1], 0.0, True, 10_000.0)
+
+    assert set(resultados) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    # 3 semanas, train_weeks=1 -> 2 semanas de aplicación por estrategia
+    assert all(len(p) == 2 for p in planes.values())
+    # con train_weeks=1, wf-pico usa el pico de la semana anterior
+    esperado = (weekly[0]["peak"]["buy_drop_pct"],
+                weekly[0]["peak"]["sell_rise_pct"],
+                weekly[0]["peak"]["interval_minutes"])
+    assert planes["wf-pico"][0] == esperado
+    # el oráculo usa el pico de la propia semana
+    assert planes["oraculo"][1][0] == weekly[2]["peak"]["buy_drop_pct"]
+    for r in resultados.values():
+        assert "roi" in r and "total_equity" in r

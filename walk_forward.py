@@ -78,6 +78,47 @@ def median_params(past_peaks: list[dict]) -> tuple[float, float, int]:
     return drop, rise, interval
 
 
+def simulate_adaptive(week_dfs: list[pd.DataFrame], params_per_week: list[tuple[float, float, int]], fee_pct: float, use_pool: bool, buy_amount: float) -> dict:
+    state = None
+    result = None
+    for df_week, (drop, rise, interval) in zip(week_dfs, params_per_week, strict=True):
+        sub = df_week.iloc[::interval].reset_index(drop=True)
+        result = simulate(sub, MAX_BUYS, drop, rise, fee_pct, use_pool, buy_amount, interval, state=state)
+        state = result["state"]
+    return result
+
+
+def tournament(weekly: list[dict], train_weeks: int, intervals: list[int], fee_pct: float, use_pool: bool, buy_amount: float) -> tuple[dict, dict]:
+    def params_of(r: dict) -> tuple[float, float, int]:
+        return (r["buy_drop_pct"], r["sell_rise_pct"], r["interval_minutes"])
+
+    app = range(train_weeks, len(weekly))
+    app_dfs = [weekly[i]["wk"]["df"] for i in app]
+
+    planes = {"fija-mediana": [], "wf-pico": [], "wf-meseta": [], "oraculo": []}
+    for i in app:
+        planes["fija-mediana"].append(median_params([weekly[j]["peak"] for j in range(i)]))
+
+        if train_weeks == 1:
+            train_results = weekly[i - 1]["results"]
+        else:
+            train_df = pd.concat(
+                [weekly[j]["wk"]["df"] for j in range(i - train_weeks, i)],
+                ignore_index=True,
+            )
+            train_results = run_grid(train_df, intervals, fee_pct, use_pool, buy_amount)
+
+        planes["wf-pico"].append(params_of(select_peak(train_results)))
+        planes["wf-meseta"].append(params_of(select_plateau(train_results)[0]))
+        planes["oraculo"].append(params_of(weekly[i]["peak"]))
+
+    resultados = {
+        nombre: simulate_adaptive(app_dfs, plan, fee_pct, use_pool, buy_amount)
+        for nombre, plan in planes.items()
+    }
+    return resultados, planes
+
+
 def regret_series(weekly: list[dict], fee_pct: float, use_pool: bool, buy_amount: float) -> list[dict]:
     rows = []
     for i in range(1, len(weekly)):
