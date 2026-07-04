@@ -154,6 +154,26 @@ def test_median_params():
     assert interval == 20
 
 
+def test_median_params_conteo_par_redondeo_banker():
+    # 4 picos (conteo par) -> np.median promedia los dos valores centrales de
+    # buy_drop_pct = [2,3,6,7] pp, dando exactamente 4.5pp: un empate exacto
+    # de redondeo. round() de Python usa "banker's rounding" (redondeo al par
+    # más cercano), por lo que round(4.5) -> 4, no 5. Este test fija ese
+    # comportamiento real y no obvio para que un caller futuro (el torneo de
+    # la Task 6, que invocará median_params con conteos pares de picos
+    # semanales pasados) no se sorprenda si algún día cambia.
+    peaks = [
+        _combo(2, 10, 1.0, interval=20),
+        _combo(3, 10, 1.0, interval=20),
+        _combo(6, 10, 1.0, interval=5),
+        _combo(7, 10, 1.0, interval=20),
+    ]
+    drop, rise, interval = median_params(peaks)
+    assert drop == pytest.approx(0.04)  # mediana 4.5pp -> round-half-to-even -> 4
+    assert rise == pytest.approx(0.10)
+    assert interval == 20
+
+
 def _weekly_sintetico(n_semanas=2, bars=80):
     rng = np.random.default_rng(7)
     weekly = []
