@@ -1,0 +1,57 @@
+import pandas as pd
+import pytest
+
+from optimize import simulate, new_state, MAX_BUYS
+
+
+def make_df(prices, start="2026-01-05 14:30", freq="1min"):
+    ts = pd.date_range(start, periods=len(prices), freq=freq, tz="UTC")
+    return pd.DataFrame({"timestamp": ts, "close": [float(p) for p in prices]})
+
+
+# Secuencia calculada a mano (drop=5%, rise=5%, fee=0, pool ON, buy=10000):
+#   100 -> compra inicial (100 acciones, cash 90000)
+#   94  -> <= 95 (target compra): compra 10000/94 acciones, cash 80000
+#   99  -> >= 98.7 (target venta s/94): vende, revenue 10531.9148936..., pool 531.91...
+#   106 -> >= 105 (target venta s/100): vende 100 acc., revenue 10600, pool 1131.9148936...
+#   100 -> sin posiciones: compra con bonus pool/10 = 113.19..., qty 101.1319...
+ZIGZAG = [100, 94, 99, 106, 100]
+
+
+def test_simulate_retrocompatible_zigzag():
+    df = make_df(ZIGZAG)
+    r = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0)
+    assert r["buys"] == 3
+    assert r["sells"] == 2
+    assert r["open_positions"] == 1
+    assert r["total_equity"] == pytest.approx(101131.9148936, abs=1e-4)
+    assert r["roi"] == pytest.approx(1.1319148936, abs=1e-6)
+    assert "state" in r
+
+
+def test_simulate_encadenado_equivale_a_corrida_unica():
+    df = make_df(ZIGZAG)
+    completo = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0)
+
+    df_a, df_b = df.iloc[:3].reset_index(drop=True), df.iloc[3:].reset_index(drop=True)
+    r1 = simulate(df_a, MAX_BUYS, 0.05, 0.05, 0.0)
+    r2 = simulate(df_b, MAX_BUYS, 0.05, 0.05, 0.0, state=r1["state"])
+
+    assert r2["total_equity"] == pytest.approx(completo["total_equity"])
+    assert r2["roi"] == pytest.approx(completo["roi"])
+    assert r2["buys"] == completo["buys"]
+    assert r2["sells"] == completo["sells"]
+    assert r2["open_positions"] == completo["open_positions"]
+
+
+def test_simulate_no_muta_el_state_del_caller():
+    df = make_df(ZIGZAG)
+    st = new_state()
+    simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, state=st)
+    assert st == new_state()
+
+
+def test_simulate_usa_buy_amount():
+    df = make_df([100.0])
+    r = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, buy_amount=5_000.0)
+    assert r["state"]["cash"] == pytest.approx(95_000.0)

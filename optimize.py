@@ -21,12 +21,25 @@ STARTING_CASH = 100_000.0
 # ---------------------------------------------------------------------------
 # Simulación (misma lógica que backtest.py, sin I/O)
 # ---------------------------------------------------------------------------
-def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1) -> dict:
-    cash        = STARTING_CASH
-    purchases   = []
-    profit_pool = 0.0
-    total_buys  = total_sells = 0
-    total_fees  = 0.0
+def new_state(starting_cash: float = STARTING_CASH) -> dict:
+    return {
+        "cash":        starting_cash,
+        "purchases":   [],
+        "profit_pool": 0.0,
+        "total_buys":  0,
+        "total_sells": 0,
+        "total_fees":  0.0,
+    }
+
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None) -> dict:
+    if state is None:
+        state = new_state()
+    cash        = state["cash"]
+    purchases   = list(state["purchases"])
+    profit_pool = state["profit_pool"]
+    total_buys  = state["total_buys"]
+    total_sells = state["total_sells"]
+    total_fees  = state["total_fees"]
 
     for _, row in df.iterrows():
         price = float(row["close"])
@@ -34,7 +47,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
         if len(purchases) == 0:
             free_slots    = max_buys - len(purchases)
             bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
-            effective_buy = BUY_AMOUNT + bonus
+            effective_buy = buy_amount + bonus
             qty     = effective_buy / price
             buy_fee = effective_buy * fee_pct
             cash   -= effective_buy + buy_fee
@@ -53,7 +66,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             if len(purchases) < max_buys:
                 free_slots    = max_buys - len(purchases)
                 bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
-                effective_buy = BUY_AMOUNT + bonus
+                effective_buy = buy_amount + bonus
                 qty     = effective_buy / price
                 buy_fee = effective_buy * fee_pct
                 cash   -= effective_buy + buy_fee
@@ -93,6 +106,14 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
         "buys":           total_buys,
         "sells":          total_sells,
         "open_positions": len(purchases),
+        "state": {
+            "cash":        cash,
+            "purchases":   purchases,
+            "profit_pool": profit_pool,
+            "total_buys":  total_buys,
+            "total_sells": total_sells,
+            "total_fees":  total_fees,
+        },
     }
 
 # ---------------------------------------------------------------------------
