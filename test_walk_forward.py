@@ -303,9 +303,9 @@ def test_run_analysis_pipeline_completo():
         partes.append(make_df(prices, start=lunes[i].strftime("%Y-%m-%d 15:00")))
     df = pd.concat(partes, ignore_index=True)
 
-    out = run_analysis(df, intervals=[1], train_weeks=1, fee_pct=0.0, use_pool=True, buy_amount=10_000.0)
+    out = run_analysis(df, intervals=[1], train_periods=1, fee_pct=0.0, use_pool=True, buy_amount=10_000.0)
 
-    assert len(out["weekly"]) == 4
+    assert len(out["periods"]) == 4
     assert len(out["regret"]) == 3
     assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
     assert 0.01 <= out["stats"]["median_drop"] <= 0.10
@@ -341,9 +341,9 @@ def test_run_analysis_veredicto_no_se_justifica_cuando_fija_empata_adaptativas()
     partes = [make_df(base_prices, start=lunes[i].strftime("%Y-%m-%d 15:00")) for i in range(n_semanas)]
     df = pd.concat(partes, ignore_index=True)
 
-    out = run_analysis(df, intervals=[1], train_weeks=1, fee_pct=0.0, use_pool=True, buy_amount=10_000.0)
+    out = run_analysis(df, intervals=[1], train_periods=1, fee_pct=0.0, use_pool=True, buy_amount=10_000.0)
 
-    assert len(out["weekly"]) == 3
+    assert len(out["periods"]) == 3
     assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
 
     # Con esta semilla y semanas idénticas, el torneo real da un empate
@@ -380,3 +380,22 @@ def test_cli_train_weeks_menor_a_uno_falla_limpio_sin_traceback(train_weeks):
     assert "--train-weeks debe ser >= 1" in proc.stderr
     assert "Traceback" not in proc.stderr
     assert "ValueError" not in proc.stderr
+
+
+def test_run_analysis_con_period_month_pipeline_completo():
+    rng = np.random.default_rng(13)
+    partes = []
+    meses_inicio = ["2026-01-05", "2026-02-05", "2026-03-05", "2026-04-05"]
+    for start in meses_inicio:
+        prices = 100 * np.cumprod(1 + rng.normal(0, 0.01, 80))
+        partes.append(make_df(prices, start=f"{start} 15:00"))
+    df = pd.concat(partes, ignore_index=True)
+
+    out = run_analysis(df, intervals=[1], train_periods=1, fee_pct=0.0, use_pool=True,
+                        buy_amount=10_000.0, period="month")
+
+    assert len(out["periods"]) == 4
+    assert [p["wk"]["label"] for p in out["periods"]] == ["2026-M01", "2026-M02", "2026-M03", "2026-M04"]
+    assert len(out["regret"]) == 3
+    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    assert isinstance(out["veredicto"], str) and len(out["veredicto"]) > 0

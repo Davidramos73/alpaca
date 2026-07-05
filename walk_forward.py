@@ -88,39 +88,39 @@ def median_params(past_peaks: list[dict]) -> tuple[float, float, int]:
     return drop, rise, interval
 
 
-def simulate_adaptive(week_dfs: list[pd.DataFrame], params_per_week: list[tuple[float, float, int]], fee_pct: float, use_pool: bool, buy_amount: float) -> dict:
+def simulate_adaptive(period_dfs: list[pd.DataFrame], params_per_period: list[tuple[float, float, int]], fee_pct: float, use_pool: bool, buy_amount: float) -> dict:
     state = None
     result = None
-    for df_week, (drop, rise, interval) in zip(week_dfs, params_per_week, strict=True):
-        sub = df_week.iloc[::interval].reset_index(drop=True)
+    for df_period, (drop, rise, interval) in zip(period_dfs, params_per_period, strict=True):
+        sub = df_period.iloc[::interval].reset_index(drop=True)
         result = simulate(sub, MAX_BUYS, drop, rise, fee_pct, use_pool, buy_amount, interval, state=state)
         state = result["state"]
     return result
 
 
-def tournament(weekly: list[dict], train_weeks: int, intervals: list[int], fee_pct: float, use_pool: bool, buy_amount: float) -> tuple[dict, dict]:
+def tournament(periods: list[dict], train_periods: int, intervals: list[int], fee_pct: float, use_pool: bool, buy_amount: float) -> tuple[dict, dict]:
     def params_of(r: dict) -> tuple[float, float, int]:
         return (r["buy_drop_pct"], r["sell_rise_pct"], r["interval_minutes"])
 
-    app = range(train_weeks, len(weekly))
-    app_dfs = [weekly[i]["wk"]["df"] for i in app]
+    app = range(train_periods, len(periods))
+    app_dfs = [periods[i]["wk"]["df"] for i in app]
 
     planes = {"fija-mediana": [], "wf-pico": [], "wf-meseta": [], "oraculo": []}
     for i in app:
-        planes["fija-mediana"].append(median_params([weekly[j]["peak"] for j in range(i)]))
+        planes["fija-mediana"].append(median_params([periods[j]["peak"] for j in range(i)]))
 
-        if train_weeks == 1:
-            train_results = weekly[i - 1]["results"]
+        if train_periods == 1:
+            train_results = periods[i - 1]["results"]
         else:
             train_df = pd.concat(
-                [weekly[j]["wk"]["df"] for j in range(i - train_weeks, i)],
+                [periods[j]["wk"]["df"] for j in range(i - train_periods, i)],
                 ignore_index=True,
             )
             train_results = run_grid(train_df, intervals, fee_pct, use_pool, buy_amount)
 
         planes["wf-pico"].append(params_of(select_peak(train_results)))
         planes["wf-meseta"].append(params_of(select_plateau(train_results)[0]))
-        planes["oraculo"].append(params_of(weekly[i]["peak"]))
+        planes["oraculo"].append(params_of(periods[i]["peak"]))
 
     resultados = {
         nombre: simulate_adaptive(app_dfs, plan, fee_pct, use_pool, buy_amount)
@@ -129,16 +129,16 @@ def tournament(weekly: list[dict], train_weeks: int, intervals: list[int], fee_p
     return resultados, planes
 
 
-def regret_series(weekly: list[dict], fee_pct: float, use_pool: bool, buy_amount: float) -> list[dict]:
+def regret_series(periods: list[dict], fee_pct: float, use_pool: bool, buy_amount: float) -> list[dict]:
     rows = []
-    for i in range(1, len(weekly)):
-        prev = weekly[i - 1]["peak"]
+    for i in range(1, len(periods)):
+        prev = periods[i - 1]["peak"]
         d, r, m = prev["buy_drop_pct"], prev["sell_rise_pct"], prev["interval_minutes"]
-        sub = weekly[i]["wk"]["df"].iloc[::m].reset_index(drop=True)
+        sub = periods[i]["wk"]["df"].iloc[::m].reset_index(drop=True)
         applied = simulate(sub, MAX_BUYS, d, r, fee_pct, use_pool, buy_amount, m)
-        own = weekly[i]["peak"]["roi"]
+        own = periods[i]["peak"]["roi"]
         rows.append({
-            "label":       weekly[i]["wk"]["label"],
+            "label":       periods[i]["wk"]["label"],
             "own_roi":     own,
             "applied_roi": applied["roi"],
             "regret":      own - applied["roi"],
@@ -146,18 +146,18 @@ def regret_series(weekly: list[dict], fee_pct: float, use_pool: bool, buy_amount
     return rows
 
 
-def run_analysis(df_1min: pd.DataFrame, intervals: list[int], train_weeks: int, fee_pct: float, use_pool: bool, buy_amount: float) -> dict:
-    weeks = split_periods(df_1min, "week")
-    if len(weeks) <= train_weeks + 1:
-        raise SystemExit(f"Error: {len(weeks)} semana(s) de datos; se necesitan al menos {train_weeks + 2}.")
+def run_analysis(df_1min: pd.DataFrame, intervals: list[int], train_periods: int, fee_pct: float, use_pool: bool, buy_amount: float, period: str = "week") -> dict:
+    periods_list = split_periods(df_1min, period)
+    if len(periods_list) <= train_periods + 1:
+        raise SystemExit(f"Error: {len(periods_list)} período(s) de datos; se necesitan al menos {train_periods + 2}.")
 
-    weekly = []
-    for n, wk in enumerate(weeks, 1):
-        print(f"  Grid semana {n}/{len(weeks)} ({wk['label']})", end="\r")
-        results = run_grid(wk["df"], intervals, fee_pct, use_pool, buy_amount)
+    periods = []
+    for n, p in enumerate(periods_list, 1):
+        print(f"  Grid período {n}/{len(periods_list)} ({p['label']})", end="\r")
+        results = run_grid(p["df"], intervals, fee_pct, use_pool, buy_amount)
         plateau, plateau_score = select_plateau(results)
-        weekly.append({
-            "wk": wk,
+        periods.append({
+            "wk": p,
             "results": results,
             "peak": select_peak(results),
             "plateau": plateau,
@@ -165,9 +165,9 @@ def run_analysis(df_1min: pd.DataFrame, intervals: list[int], train_weeks: int, 
         })
     print()
 
-    drops = [w["peak"]["buy_drop_pct"] for w in weekly]
-    rises = [w["peak"]["sell_rise_pct"] for w in weekly]
-    ints  = [w["peak"]["interval_minutes"] for w in weekly]
+    drops = [p["peak"]["buy_drop_pct"] for p in periods]
+    rises = [p["peak"]["sell_rise_pct"] for p in periods]
+    ints  = [p["peak"]["interval_minutes"] for p in periods]
     q75d, q25d = np.percentile(drops, [75, 25])
     q75r, q25r = np.percentile(rises, [75, 25])
     stats = {
@@ -182,8 +182,8 @@ def run_analysis(df_1min: pd.DataFrame, intervals: list[int], train_weeks: int, 
         "interval_counts": dict(pd.Series(ints).value_counts().sort_index()),
     }
 
-    regret = regret_series(weekly, fee_pct, use_pool, buy_amount)
-    torneo, planes = tournament(weekly, train_weeks, intervals, fee_pct, use_pool, buy_amount)
+    regret = regret_series(periods, fee_pct, use_pool, buy_amount)
+    torneo, planes = tournament(periods, train_periods, intervals, fee_pct, use_pool, buy_amount)
 
     fija = torneo["fija-mediana"]["roi"]
     adaptativas = {"WF-pico": torneo["wf-pico"]["roi"], "WF-meseta": torneo["wf-meseta"]["roi"]}
@@ -194,14 +194,14 @@ def run_analysis(df_1min: pd.DataFrame, intervals: list[int], train_weeks: int, 
             f"Fija-mediana ({fija:+.2f}%). Techo teórico (Oráculo): {torneo['oraculo']['roi']:+.2f}%."
         )
     else:
-        d, r, m = median_params([w["peak"] for w in weekly])
+        d, r, m = median_params([p["peak"] for p in periods])
         veredicto = (
             f"EL AUTO-AJUSTE NO SE JUSTIFICA: Fija-mediana ({fija:+.2f}%) le gana a "
             f"WF-pico ({adaptativas['WF-pico']:+.2f}%) y WF-meseta ({adaptativas['WF-meseta']:+.2f}%). "
             f"Recomendación: parámetros fijos drop={d*100:.0f}% rise={r*100:.0f}% intervalo={m} min."
         )
 
-    return {"weekly": weekly, "stats": stats, "regret": regret,
+    return {"periods": periods, "stats": stats, "regret": regret,
             "torneo": torneo, "planes": planes, "veredicto": veredicto}
 
 
@@ -210,7 +210,7 @@ SEP2 = "-" * 80
 
 
 def build_report(symbol: str, out: dict, train_weeks: int, intervals: list[int], buy_amount: float, fee_pct: float, use_pool: bool) -> list[str]:
-    weekly, stats, regret = out["weekly"], out["stats"], out["regret"]
+    weekly, stats, regret = out["periods"], out["stats"], out["regret"]
     torneo, planes = out["torneo"], out["planes"]
 
     lines = [
@@ -337,7 +337,7 @@ def main():
         "plateau_rise":     w["plateau"]["sell_rise_pct"],
         "plateau_interval": w["plateau"]["interval_minutes"],
         "plateau_roi":      w["plateau"]["roi"],
-    } for w in out["weekly"]]
+    } for w in out["periods"]]
     pd.DataFrame(filas).to_csv(csv_path, index=False)
 
     print(f"\nLog guardado en  : {log_path}")
