@@ -209,29 +209,29 @@ SEP  = "=" * 80
 SEP2 = "-" * 80
 
 
-def build_report(symbol: str, out: dict, train_weeks: int, intervals: list[int], buy_amount: float, fee_pct: float, use_pool: bool) -> list[str]:
-    weekly, stats, regret = out["periods"], out["stats"], out["regret"]
+def build_report(symbol: str, out: dict, train_periods: int, intervals: list[int], buy_amount: float, fee_pct: float, use_pool: bool, period: str) -> list[str]:
+    periods, stats, regret = out["periods"], out["stats"], out["regret"]
     torneo, planes = out["torneo"], out["planes"]
 
     lines = [
         SEP,
         f"  WALK-FORWARD {symbol} — Ejecutado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         SEP,
-        f"  Semanas: {len(weekly)}  ({weekly[0]['wk']['label']} → {weekly[-1]['wk']['label']})"
-        f"   |   train_weeks: {train_weeks}   |   intervalos: {intervals}",
+        f"  Períodos: {len(periods)}  ({periods[0]['wk']['label']} → {periods[-1]['wk']['label']})"
+        f"   |   granularidad: {period}   |   train_periods: {train_periods}   |   intervalos: {intervals}",
         f"  Monto por compra: ${buy_amount:,.0f}   |   fee: {fee_pct*100:.3f}%   |   pool: {'ON' if use_pool else 'OFF'}",
         SEP,
         "",
-        "  1) ESTABILIDAD DE LOS ÓPTIMOS SEMANALES",
+        "  1) ESTABILIDAD DE LOS ÓPTIMOS POR PERÍODO",
         SEP2,
-        f"  {'semana':<10}  {'velas':>6}  {'drop':>5}  {'rise':>5}  {'min':>4}  {'ROI%':>8}   |  {'meseta d/r/min':>15}  {'ROI%':>8}",
+        f"  {'período':<10}  {'velas':>6}  {'drop':>5}  {'rise':>5}  {'min':>4}  {'ROI%':>8}   |  {'meseta d/r/min':>15}  {'ROI%':>8}",
         SEP2,
     ]
-    for w in weekly:
-        p, q = w["peak"], w["plateau"]
+    for p in periods:
+        pk, q = p["peak"], p["plateau"]
         lines.append(
-            f"  {w['wk']['label']:<10}  {len(w['wk']['df']):>6}  "
-            f"{p['buy_drop_pct']*100:>4.0f}%  {p['sell_rise_pct']*100:>4.0f}%  {p['interval_minutes']:>4}  {p['roi']:>+8.2f}   |  "
+            f"  {p['wk']['label']:<10}  {len(p['wk']['df']):>6}  "
+            f"{pk['buy_drop_pct']*100:>4.0f}%  {pk['sell_rise_pct']*100:>4.0f}%  {pk['interval_minutes']:>4}  {pk['roi']:>+8.2f}   |  "
             f"{q['buy_drop_pct']*100:>4.0f}/{q['sell_rise_pct']*100:>3.0f}/{q['interval_minutes']:>4}  {q['roi']:>+8.2f}"
         )
     lines += [
@@ -239,11 +239,11 @@ def build_report(symbol: str, out: dict, train_weeks: int, intervals: list[int],
         f"  drop óptimo : mediana {stats['median_drop']*100:.1f}%  desvío {stats['std_drop']*100:.2f}pp  IQR {stats['iqr_drop']*100:.1f}pp  autocorr lag-1 {stats['corr_drop']:+.2f}",
         f"  rise óptimo : mediana {stats['median_rise']*100:.1f}%  desvío {stats['std_rise']*100:.2f}pp  IQR {stats['iqr_rise']*100:.1f}pp  autocorr lag-1 {stats['corr_rise']:+.2f}",
         f"  intervalos ganadores: {stats['interval_counts']}",
-        f"  (n = {len(weekly)} semanas: muestra chica, interpretar la autocorrelación con cautela)",
+        f"  (n = {len(periods)} períodos: muestra chica, interpretar la autocorrelación con cautela)",
         "",
-        "  REGRET (usar el óptimo de la semana anterior vs el propio, semanas aisladas)",
+        "  REGRET (usar el óptimo del período anterior vs el propio, períodos aislados)",
         SEP2,
-        f"  {'semana':<10}  {'ROI propio':>10}  {'ROI aplicado':>12}  {'regret':>8}",
+        f"  {'período':<10}  {'ROI propio':>10}  {'ROI aplicado':>12}  {'regret':>8}",
         SEP2,
     ]
     for row in regret:
@@ -253,8 +253,8 @@ def build_report(symbol: str, out: dict, train_weeks: int, intervals: list[int],
         SEP2,
         f"  regret promedio {np.mean(regrets):.2f}pp  |  mediana {np.median(regrets):.2f}pp  |  peor {np.max(regrets):.2f}pp",
         "",
-        "  2) TORNEO DE ESTRATEGIAS (portfolio continuo, semanas de aplicación: "
-        f"{len(weekly) - train_weeks})",
+        "  2) TORNEO DE ESTRATEGIAS (portfolio continuo, períodos de aplicación: "
+        f"{len(periods) - train_periods})",
         SEP2,
         f"  {'estrategia':<14}  {'ROI%':>8}  {'Ganancia':>12}  {'Capital':>12}  {'Compras':>7}  {'Ventas':>6}  {'Open':>5}  {'Fees':>10}",
         SEP2,
@@ -268,24 +268,24 @@ def build_report(symbol: str, out: dict, train_weeks: int, intervals: list[int],
     lines += [
         SEP2,
         "",
-        "  PARÁMETROS USADOS POR SEMANA (drop%/rise%/min)",
+        "  PARÁMETROS USADOS POR PERÍODO (drop%/rise%/min)",
         SEP2,
-        "  " + f"{'semana':<10}" + "".join(f"  {n:>14}" for n in planes),
+        "  " + f"{'período':<10}" + "".join(f"  {n:>14}" for n in planes),
         SEP2,
     ]
-    app_weeks = weekly[train_weeks:]
-    for k, w in enumerate(app_weeks):
+    app_periods = periods[train_periods:]
+    for k, p in enumerate(app_periods):
         celdas = "".join(
             f"  {planes[n][k][0]*100:>4.0f}/{planes[n][k][1]*100:>3.0f}/{planes[n][k][2]:>4}"
             for n in planes
         )
-        lines.append(f"  {w['wk']['label']:<10}{celdas}")
+        lines.append(f"  {p['wk']['label']:<10}{celdas}")
     lines += [SEP2, "", "  3) VEREDICTO", SEP2, f"  {out['veredicto']}", SEP]
     return lines
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Walk-forward: estabilidad de óptimos semanales y torneo de estrategias")
+    parser = argparse.ArgumentParser(description="Walk-forward: estabilidad de óptimos por período y torneo de estrategias")
     parser.add_argument("--symbol",      type=str,   default="TSLA")
     parser.add_argument("--date-start",  type=str,   default="2026-01-01")
     parser.add_argument("--date-end",    type=str,   default="2026-06-28")
@@ -293,11 +293,12 @@ def main():
     parser.add_argument("--fee-pct",     type=float, default=0.0)
     parser.add_argument("--no-profit-pool", action="store_true")
     parser.add_argument("--intervals",   type=str,   default="20", help="Intervalos de revisión en minutos, separados por coma")
-    parser.add_argument("--train-weeks", type=int,   default=1, help="Semanas previas usadas para optimizar (default: 1)")
+    parser.add_argument("--period",      type=str,   default="week", choices=["week", "month"], help="Granularidad de los períodos (default: week)")
+    parser.add_argument("--train-periods", type=int, default=1, help="Períodos previos usados para optimizar (default: 1)")
     args = parser.parse_args()
 
-    if args.train_weeks < 1:
-        parser.error("--train-weeks debe ser >= 1")
+    if args.train_periods < 1:
+        parser.error("--train-periods debe ser >= 1")
 
     load_dotenv()
     api_key    = os.getenv("ALPACA_API_KEY")
@@ -312,9 +313,9 @@ def main():
     df_1min = load_bars(symbol, date_start, date_end, api_key, secret_key)
     print(f"Velas de 1 minuto cargadas: {len(df_1min)}\n")
 
-    out = run_analysis(df_1min, intervals, args.train_weeks, args.fee_pct, use_pool, args.buy_amount)
+    out = run_analysis(df_1min, intervals, args.train_periods, args.fee_pct, use_pool, args.buy_amount, period=args.period)
 
-    lines = build_report(symbol, out, args.train_weeks, intervals, args.buy_amount, args.fee_pct, use_pool)
+    lines = build_report(symbol, out, args.train_periods, intervals, args.buy_amount, args.fee_pct, use_pool, args.period)
     print("\n".join(lines))
 
     run_ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -325,19 +326,19 @@ def main():
         f.write("\n".join(lines) + "\n")
 
     filas = [{
-        "week_label":       w["wk"]["label"],
-        "week_start":       w["wk"]["start"],
-        "week_end":         w["wk"]["end"],
-        "bars":             len(w["wk"]["df"]),
-        "best_drop":        w["peak"]["buy_drop_pct"],
-        "best_rise":        w["peak"]["sell_rise_pct"],
-        "best_interval":    w["peak"]["interval_minutes"],
-        "best_roi":         w["peak"]["roi"],
-        "plateau_drop":     w["plateau"]["buy_drop_pct"],
-        "plateau_rise":     w["plateau"]["sell_rise_pct"],
-        "plateau_interval": w["plateau"]["interval_minutes"],
-        "plateau_roi":      w["plateau"]["roi"],
-    } for w in out["periods"]]
+        "period_label":     p["wk"]["label"],
+        "period_start":     p["wk"]["start"],
+        "period_end":       p["wk"]["end"],
+        "bars":             len(p["wk"]["df"]),
+        "best_drop":        p["peak"]["buy_drop_pct"],
+        "best_rise":        p["peak"]["sell_rise_pct"],
+        "best_interval":    p["peak"]["interval_minutes"],
+        "best_roi":         p["peak"]["roi"],
+        "plateau_drop":     p["plateau"]["buy_drop_pct"],
+        "plateau_rise":     p["plateau"]["sell_rise_pct"],
+        "plateau_interval": p["plateau"]["interval_minutes"],
+        "plateau_roi":      p["plateau"]["roi"],
+    } for p in out["periods"]]
     pd.DataFrame(filas).to_csv(csv_path, index=False)
 
     print(f"\nLog guardado en  : {log_path}")

@@ -355,31 +355,55 @@ def test_run_analysis_veredicto_no_se_justifica_cuando_fija_empata_adaptativas()
     assert out["torneo"]["fija-mediana"]["roi"] >= out["torneo"]["wf-meseta"]["roi"]
 
 
-@pytest.mark.parametrize("train_weeks", ["0", "-3"])
-def test_cli_train_weeks_menor_a_uno_falla_limpio_sin_traceback(train_weeks):
-    # Antes de la validación agregada en main(), --train-weeks 0 (o negativo)
-    # NO era rechazado por argparse ni por el guard de run_analysis()
-    # (len(weeks) <= train_weeks + 1), y terminaba crasheando mucho más abajo
-    # en median_params()/np.median([]) con un ValueError crudo ("cannot
-    # convert float NaN to integer") en cuanto tournament() intentaba
-    # calcular fija-mediana para la primera semana de aplicación con cero
-    # semanas de entrenamiento. La validación vive en main() justo después de
-    # parser.parse_args(), antes de load_dotenv()/load_bars(), así que este
-    # subprocess nunca llega a tocar red ni caché: debe fallar de inmediato
-    # con el mensaje de argparse (parser.error, exit code 2), no con un
-    # traceback de Python.
+@pytest.mark.parametrize("train_periods", ["0", "-3"])
+def test_cli_train_periods_menor_a_uno_falla_limpio_sin_traceback(train_periods):
+    # Mismo caso que antes (antes con --train-weeks), ahora con el flag
+    # renombrado --train-periods. La validación vive en main() justo después
+    # de parser.parse_args(), antes de load_dotenv()/load_bars(), así que
+    # este subprocess nunca llega a tocar red ni caché.
     script = Path(__file__).resolve().parent / "walk_forward.py"
     proc = subprocess.run(
-        [sys.executable, str(script), "--train-weeks", train_weeks],
+        [sys.executable, str(script), "--train-periods", train_periods],
         capture_output=True,
         text=True,
         timeout=30,
     )
-
     assert proc.returncode == 2
-    assert "--train-weeks debe ser >= 1" in proc.stderr
+    assert "--train-periods debe ser >= 1" in proc.stderr
     assert "Traceback" not in proc.stderr
     assert "ValueError" not in proc.stderr
+
+
+@pytest.mark.parametrize("period", ["week", "month"])
+def test_cli_period_acepta_week_y_month_sin_crashear(period):
+    # No corre el pipeline completo (evitaría tocar red/caché real). Combina
+    # un --period válido con --train-periods 0 (inválido, ya cubierto arriba)
+    # para llegar hasta la validación de argparse de --period (que debe
+    # aceptar "week"/"month" sin rechazarlos) y frenar ahí mismo con el error
+    # ya conocido de --train-periods, sin tocar load_bars/red.
+    script = Path(__file__).resolve().parent / "walk_forward.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--period", period, "--train-periods", "0"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 2
+    assert "--train-periods debe ser >= 1" in proc.stderr
+    assert "invalid choice" not in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_cli_period_invalido_rechazado_por_argparse():
+    script = Path(__file__).resolve().parent / "walk_forward.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--period", "quarter"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc.returncode == 2
+    assert "invalid choice" in proc.stderr
 
 
 def test_run_analysis_con_period_month_pipeline_completo():
