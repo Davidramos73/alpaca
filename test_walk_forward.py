@@ -16,7 +16,7 @@ from walk_forward import (
     select_peak,
     select_plateau,
     simulate_adaptive,
-    split_weeks,
+    split_periods,
     tournament,
 )
 
@@ -74,7 +74,7 @@ def test_simulate_usa_buy_amount():
     assert r["state"]["cash"] == pytest.approx(95_000.0)
 
 
-def test_split_weeks_semanas_iso_y_huecos():
+def test_split_periods_semanas_iso_y_huecos():
     # Vie 2026-01-09 (W02), Lun/Mar 2026-01-12/13 (W03), hueco, Mié 2026-01-21 (W04)
     partes = [
         make_df([100] * 10, start="2026-01-09 15:00"),
@@ -83,14 +83,32 @@ def test_split_weeks_semanas_iso_y_huecos():
         make_df([100] * 5,  start="2026-01-21 15:00"),
     ]
     df = pd.concat(partes, ignore_index=True)
-    weeks = split_weeks(df)
+    periods = split_periods(df, "week")
 
-    assert [w["label"] for w in weeks] == ["2026-W02", "2026-W03", "2026-W04"]
-    assert [len(w["df"]) for w in weeks] == [10, 35, 5]
-    assert weeks[0]["start"] == df["timestamp"].iloc[0]
-    assert weeks[2]["end"] == df["timestamp"].iloc[-1]
-    # cada df semanal viene con índice reseteado
-    assert list(weeks[1]["df"].index) == list(range(35))
+    assert [p["label"] for p in periods] == ["2026-W02", "2026-W03", "2026-W04"]
+    assert [len(p["df"]) for p in periods] == [10, 35, 5]
+    assert periods[0]["start"] == df["timestamp"].iloc[0]
+    assert periods[2]["end"] == df["timestamp"].iloc[-1]
+    # cada df de período viene con índice reseteado
+    assert list(periods[1]["df"].index) == list(range(35))
+
+
+def test_split_periods_meses_calendario_y_hueco():
+    # Mié 2026-01-28 y Vie 2026-01-30 (mismo mes, M01), hueco de una semana,
+    # Mié 2026-02-11 (M02)
+    partes = [
+        make_df([100] * 10, start="2026-01-28 15:00"),
+        make_df([100] * 8,  start="2026-01-30 15:00"),
+        make_df([100] * 5,  start="2026-02-11 15:00"),
+    ]
+    df = pd.concat(partes, ignore_index=True)
+    periods = split_periods(df, "month")
+
+    assert [p["label"] for p in periods] == ["2026-M01", "2026-M02"]
+    assert [len(p["df"]) for p in periods] == [18, 5]
+    assert periods[0]["start"] == df["timestamp"].iloc[0]
+    assert periods[1]["end"] == df["timestamp"].iloc[-1]
+    assert list(periods[0]["df"].index) == list(range(18))
 
 
 def _combo(drop_pp, rise_pp, roi, interval=20):

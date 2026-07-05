@@ -18,18 +18,28 @@ from optimize import (
 )
 
 
-def split_weeks(df_1min: pd.DataFrame) -> list[dict]:
-    iso = df_1min["timestamp"].dt.isocalendar()
-    weeks = []
-    for (year, week), g in df_1min.groupby([iso["year"], iso["week"]], sort=True):
+def split_periods(df_1min: pd.DataFrame, period: str) -> list[dict]:
+    ts = df_1min["timestamp"]
+    if period == "week":
+        iso = ts.dt.isocalendar()
+        year_key, unit_key = iso["year"], iso["week"]
+        label_prefix = "W"
+    elif period == "month":
+        year_key, unit_key = ts.dt.year, ts.dt.month
+        label_prefix = "M"
+    else:
+        raise ValueError(f"period desconocido: {period!r} (usar 'week' o 'month')")
+
+    periods = []
+    for (year, unit), g in df_1min.groupby([year_key, unit_key], sort=True):
         g = g.reset_index(drop=True)
-        weeks.append({
-            "label": f"{year}-W{week:02d}",
+        periods.append({
+            "label": f"{year}-{label_prefix}{unit:02d}",
             "start": g["timestamp"].iloc[0],
             "end":   g["timestamp"].iloc[-1],
             "df":    g,
         })
-    return weeks
+    return periods
 
 
 def run_grid(df: pd.DataFrame, intervals: list[int], fee_pct: float, use_pool: bool, buy_amount: float) -> list[dict]:
@@ -137,7 +147,7 @@ def regret_series(weekly: list[dict], fee_pct: float, use_pool: bool, buy_amount
 
 
 def run_analysis(df_1min: pd.DataFrame, intervals: list[int], train_weeks: int, fee_pct: float, use_pool: bool, buy_amount: float) -> dict:
-    weeks = split_weeks(df_1min)
+    weeks = split_periods(df_1min, "week")
     if len(weeks) <= train_weeks + 1:
         raise SystemExit(f"Error: {len(weeks)} semana(s) de datos; se necesitan al menos {train_weeks + 2}.")
 
