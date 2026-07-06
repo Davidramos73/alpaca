@@ -82,12 +82,46 @@ Artefactos: `walkforward_TSLA_20260705_151739.log` / `.csv`, caché `cache_TSLA_
 
 A diferencia de las tres corridas semanales anteriores, acá WF-meseta (la variante "robusta") le gana a Fija-mediana. Un detalle importante: el Oráculo (+21.36%) queda **por debajo** de WF-meseta y WF-pico — a primera vista parece un contrasentido (¿cómo el "techo teórico" pierde contra una estrategia realista?), pero tiene explicación: el Oráculo elige el pico óptimo de cada mes evaluado de forma aislada (portfolio fresco), sin considerar qué posiciones quedaron abiertas de meses anteriores en el portfolio continuo real — no es un óptimo global verdadero, es un heurístico greedy mes a mes. Cuando el portfolio se encadena (como hacen todas las estrategias reales via `simulate_adaptive`), un pico aislado óptimo puede terminar siendo subóptimo dado el estado real heredado.
 
-Con solo **12 períodos** (vs. 53-79 semanales), esta es la muestra más chica de las corridas de TSLA hasta ahora — el *regret* promedio (1.96pp) y peor caso (4.25pp) son más altos que en las corridas semanales de 53-79 semanas, consistente con menos poder estadístico. No tomar esto todavía como "la granularidad mensual funciona mejor que la semanal" — hace falta repetir con más años de historia y/o otros símbolos antes de sacar esa conclusión.
+Con solo **12 períodos** (vs. 53-79 semanales), esta es la muestra más chica de las corridas de TSLA hasta ahora — el *regret* promedio (1.96pp) y peor caso (4.25pp) son más altos que en las corridas semanales de 53-79 semanas, consistente con menos poder estadístico. Actualización: las entradas #5 y #6 (2 y 3 años) repiten este análisis con mucha más muestra y confirman la dirección del hallazgo, aunque la anomalía del Oráculo descrita acá no se repite en esas corridas más grandes (ver abajo).
 
 Comando: `python3 walk_forward.py --symbol TSLA --date-start 2025-07-01 --date-end 2026-07-01 --intervals 20 --period month --train-periods 1`
 Artefactos: `walkforward_TSLA_20260706_010043.log` / `.csv` (mismo caché de 1 año que la corrida semanal #2, reutilizado sin red)
 
-### 5. SPCX, junio–julio 2026 (solo 4 semanas, intervalo 10 vs 20)
+### 5. TSLA con `--period month` — julio 2024 a julio 2026 (24 meses, intervalo 20, train-periods 1)
+
+**Segunda corrida mensual, con el doble de datos — y la jerarquía vuelve a ser la esperada (Oráculo arriba de todo).**
+
+| Estrategia | ROI |
+|---|---|
+| Fija-mediana | +58.30% |
+| WF-pico | +58.06% (prácticamente igual a Fija-mediana, igual que en semanal) |
+| **WF-meseta** | **+73.03%** |
+| Oráculo (techo teórico) | +77.80% |
+
+A diferencia de la corrida de 12 meses, acá el Oráculo (+77.80%) queda por encima de todas las estrategias reales, como es esperable — la rareza anterior no se repite con más datos, lo que le da más confianza a este resultado. WF-meseta sigue ganándole claramente a Fija-mediana (+73.03% vs +58.30%, ~15pp de diferencia), mientras que WF-pico sigue sin aportar nada por sí solo (empatado con el fijo) — el valor está específicamente en la variante robusta, no en perseguir el pico puntual del mes anterior.
+
+Comando: `python3 walk_forward.py --symbol TSLA --date-start 2024-07-01 --date-end 2026-07-01 --intervals 20 --period month --train-periods 1`
+Artefactos: `walkforward_TSLA_20260706_091220.log` / `.csv`, caché `cache_TSLA_20240701_20260701_1Min.pkl` (468,446 velas)
+
+### 6. TSLA con `--period month` — julio 2023 a julio 2026 (36 meses, intervalo 20, train-periods 1)
+
+**Tercera corrida mensual — confirma el patrón de la corrida de 24 meses con más datos todavía.**
+
+| Estrategia | ROI |
+|---|---|
+| Fija-mediana | +68.38% |
+| WF-pico | +72.15% |
+| **WF-meseta** | **+85.02%** |
+| Oráculo (techo teórico) | +105.24% |
+
+Misma jerarquía que la corrida de 24 meses (Oráculo > WF-meseta > WF-pico ≈ Fija), con WF-meseta ganándole a Fija-mediana por ~17pp (+85.02% vs +68.38%) — margen similar en magnitud al de la corrida anterior. Acá WF-pico también muestra alguna separación del fijo (+72.15% vs +68.38%), algo que no se veía tan claro en la corrida de 24 meses. La autocorrelación sigue rondando cero (drop -0.09, rise +0.03) y el *regret* peor-caso (15.12pp) es igual al de la corrida de 24 meses — probablemente el mismo mes de cambio de régimen fuerte, presente en ambos rangos.
+
+**Con dos muestras grandes y consistentes (24 y 36 meses) mostrando el mismo resultado, esto deja de ser un dato aislado:** con granularidad mensual, la variante robusta de auto-ajuste (WF-meseta) parece agregar valor real sobre un parámetro fijo para TSLA — lo opuesto de lo que se encontró con granularidad semanal en cuatro corridas distintas. Sigue siendo un solo símbolo, así que antes de convencerse del todo habría que repetir con otros símbolos.
+
+Comando: `python3 walk_forward.py --symbol TSLA --date-start 2023-07-01 --date-end 2026-07-01 --intervals 20 --period month --train-periods 1`
+Artefactos: `walkforward_TSLA_20260706_091528.log` / `.csv`, caché `cache_TSLA_20230701_20260701_1Min.pkl` (694,211 velas)
+
+### 7. SPCX, junio–julio 2026 (solo 4 semanas, intervalo 10 vs 20)
 
 **Resultado no concluyente por tamaño de muestra — pero con una lección de riesgo real.**
 
@@ -110,13 +144,15 @@ Artefactos: `walkforward_SPCX_20260704_204636.*` (intervalo 10), `walkforward_SP
 2. **El riesgo más grande no es el % de drop/rise — es la falta de un freno ante un movimiento de tendencia fuerte** (rally o crash), visto en SPCX. Ningún parámetro del grid soluciona eso; sería un mecanismo aparte (ej. circuit breaker de drawdown máximo) independiente del optimizador.
 3. **El intervalo de muestreo interactúa con el ruido del optimizador semanal** de forma no trivial: intervalos más finos pueden dar el mejor resultado con un parámetro fijo de todo el período, pero producir peor transferencia semana a semana bajo re-optimización. No asumir "más fino es peor" ni "más fino es mejor" sin volver a medir.
 4. **La hipótesis de "elegir símbolos por volatilidad" se refinó:** lo que importa para esta estrategia no es la volatilidad cruda, sino que el precio oscile en rango sin tendencia sostenida (ver caso SPCX). Antes de correr walk-forward completo símbolo por símbolo, tendría sentido armar un filtro rápido tipo "recorrido total de precio vs. desplazamiento neto" para preseleccionar candidatos — todavía no construido.
-5. **Con granularidad mensual (feature nueva `--period month`), el resultado cambió: WF-meseta le ganó a Fija-mediana en TSLA (único dato hasta ahora, 12 meses).** Contradice el patrón semanal, pero la muestra es chica (12 vs 53-79) — no alcanza para concluir que "mensual funciona mejor que semanal" todavía. Además se detectó que el Oráculo puede quedar por debajo de una estrategia realista cuando la granularidad es gruesa, porque el Oráculo optimiza cada período de forma aislada sin considerar el portfolio heredado — un matiz a tener en cuenta al interpretar "techo teórico" en corridas mensuales.
+5. **Con granularidad mensual, el resultado se invierte respecto a semanal — y ya no es un dato aislado.** En TSLA, WF-meseta le gana a Fija-mediana en las tres corridas mensuales hechas hasta ahora (12, 24 y 36 meses), con un margen de ~15-17pp en las dos muestras más grandes (24 y 36 meses, donde además la jerarquía del Oráculo es la esperada, sin la anomalía de la corrida de 12 meses). Es la conclusión más importante y sorprendente de la bitácora: **la cadencia de re-optimización importa tanto o más que si se auto-ajusta o no** — semanal parece agregar solo ruido, mensual (al menos con la variante robusta "meseta") parece agregar señal real. Sigue siendo un solo símbolo (TSLA); falta validar en otros para confiar del todo en esto.
+6. **Dentro de mensual, el valor está en la robustez (meseta), no en perseguir el pico exacto (WF-pico).** En las tres corridas mensuales, WF-pico quedó cerca o apenas por encima de Fija-mediana, mientras que WF-meseta sacó una ventaja consistente. La autocorrelación lag-1 del óptimo mensual sigue rondando cero en las tres corridas — el pico exacto de un mes no predice el del siguiente, pero un promedio robusto del vecindario sí parece capturar algo que el fijo no.
 
 ## Próximos pasos sugeridos para la próxima sesión
 
 - [x] Repetir el análisis de TSLA con el rango de fechas extendido (más semanas → autocorrelación y regret más confiables). — Hecho 2026-07-05 con 1 año (53 semanas) y 1.5 años (79 semanas): confirma el hallazgo en ambas, autocorrelación oscila cerca de 0.
-- [x] Agregar soporte para granularidad mensual a `walk_forward.py` (`--period month`). — Hecho 2026-07-06 (spec + plan + implementación vía subagentes, 24/24 tests). Primera corrida real: WF-meseta le gana a Fija-mediana en TSLA (ver hallazgo #4 arriba) — resultado a confirmar con más datos.
-- [ ] Repetir `--period month` con más años de historia y/o más símbolos para ver si "mensual favorece al auto-ajuste" es señal real o ruido de una muestra de 12 períodos.
+- [x] Agregar soporte para granularidad mensual a `walk_forward.py` (`--period month`). — Hecho 2026-07-06 (spec + plan + implementación vía subagentes, 24/24 tests).
+- [x] Repetir `--period month` con más años de historia para ver si "mensual favorece al auto-ajuste" es señal real o ruido de 12 períodos. — Hecho 2026-07-06 con 24 y 36 meses: se confirma en ambas, WF-meseta le gana a Fija-mediana por ~15-17pp (ver hallazgos #5 y #6 arriba). Ya no es ruido de muestra chica.
+- [ ] Repetir `--period month` en 1-2 símbolos más (no solo TSLA) para ver si "mensual favorece al auto-ajuste robusto" es un efecto general o específico de este símbolo.
 - [ ] Repetir SPCX con más historia si Alpaca la tiene disponible, para ver si el patrón de rally-crash de estas 4 semanas fue una anomalía o es representativo del símbolo.
 - [ ] Sumar 1-2 símbolos más (mismo comando, cambiando `--symbol`) para ver si la conclusión "fija le gana a auto-ajuste" se sostiene fuera de TSLA. Candidato natural: armar antes el filtro de rango-vs-tendencia del punto 4 de arriba para elegir mejor qué símbolos probar.
 - [ ] Si el patrón de "movimientos de tendencia fuerte rompen el grid" se repite, evaluar diseñar un mecanismo de freno (fuera del alcance de `walk_forward.py`; sería un cambio en `tradebot.py`/`backtest.py`).
@@ -125,6 +161,8 @@ Artefactos: `walkforward_SPCX_20260704_204636.*` (intervalo 10), `walkforward_SP
 
 | Fecha | Símbolo | Rango | Intervalos | period / train | Veredicto | Notas |
 |---|---|---|---|---|---|---|
+| 2026-07-06 | TSLA | 2023-07-01 → 2026-07-01 | 20 | month / train-periods 1 | SE justifica (WF-meseta +85.02% > WF-pico +72.15% > Fija +68.38%; Oráculo +105.24%) | 3 años (36 meses). Confirma la corrida de 24 meses; margen WF-meseta vs Fija ~17pp |
+| 2026-07-06 | TSLA | 2024-07-01 → 2026-07-01 | 20 | month / train-periods 1 | SE justifica (WF-meseta +73.03% > Fija +58.30% > WF-pico +58.06%; Oráculo +77.80%) | 2 años (24 meses). Oráculo vuelve a ser el techo real — la anomalía de la corrida de 12 meses no se repite |
 | 2026-07-06 | TSLA | 2025-07-01 → 2026-07-01 | 20 | month / train-periods 1 | SE justifica (WF-meseta +26.71% > WF-pico +26.58% > Fija +24.11%; Oráculo +21.36%) | Primera corrida con `--period month` (12 meses). Oráculo por debajo de estrategias reales — explicable (óptimo aislado por período, no global). Muestra chica, a confirmar |
 | 2026-07-06 | TSLA | 2026-01-01 → 2026-01-10 (sanity check) | 20 | week / train-weeks 1 | — (no es análisis real) | Corrida de verificación (`walkforward_TSLA_20260706_004853.csv`) hecha durante el desarrollo del feature `--period`, solo 5 velas de datos; sin valor analítico, se conserva por prolijidad |
 | 2026-07-05 | TSLA | 2025-01-01 → 2026-07-01 | 20 | week / train-weeks 1 | NO se justifica (Fija +22.54% > WF-pico +21.22% > WF-meseta +19.37%; Oráculo +53.56%) | 1.5 años (79 sem). Tercera confirmación consecutiva del mismo orden de estrategias |
