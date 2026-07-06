@@ -12,6 +12,7 @@ from optimize import (
     MAX_BUYS,
     SELL_RISE_RANGE,
     STARTING_CASH,
+    buy_hold_roi,
     load_bars,
     new_state,
     simulate,
@@ -126,6 +127,7 @@ def tournament(periods: list[dict], train_periods: int, intervals: list[int], fe
         nombre: simulate_adaptive(app_dfs, plan, fee_pct, use_pool, buy_amount)
         for nombre, plan in planes.items()
     }
+    resultados["buy-hold"] = buy_hold_roi(pd.concat(app_dfs, ignore_index=True))
     return resultados, planes
 
 
@@ -201,6 +203,16 @@ def run_analysis(df_1min: pd.DataFrame, intervals: list[int], train_periods: int
             f"Recomendación: parámetros fijos drop={d*100:.0f}% rise={r*100:.0f}% intervalo={m} min."
         )
 
+    bh = torneo["buy-hold"]["roi"]
+    mejor_real = max(fija, adaptativas["WF-pico"], adaptativas["WF-meseta"])
+    if mejor_real > bh:
+        veredicto += f" Buy & hold de referencia: {bh:+.2f}% — el grid le gana en este rango."
+    else:
+        veredicto += (
+            f" OJO: buy & hold ({bh:+.2f}%) supera a la mejor estrategia del grid "
+            f"({mejor_real:+.2f}%) — el grid no agrega valor sobre comprar y sostener en este símbolo/rango."
+        )
+
     return {"periods": periods, "stats": stats, "regret": regret,
             "torneo": torneo, "planes": planes, "veredicto": veredicto}
 
@@ -256,14 +268,14 @@ def build_report(symbol: str, out: dict, train_periods: int, intervals: list[int
         "  2) TORNEO DE ESTRATEGIAS (portfolio continuo, períodos de aplicación: "
         f"{len(periods) - train_periods})",
         SEP2,
-        f"  {'estrategia':<14}  {'ROI%':>8}  {'Ganancia':>12}  {'Capital':>12}  {'Compras':>7}  {'Ventas':>6}  {'Open':>5}  {'Fees':>10}",
+        f"  {'estrategia':<14}  {'ROI%':>8}  {'maxDD%':>7}  {'Ganancia':>12}  {'Capital':>12}  {'Compras':>7}  {'Ventas':>6}  {'Open':>5}  {'Fees':>10}",
         SEP2,
     ]
-    for nombre in ("fija-mediana", "wf-pico", "wf-meseta", "oraculo"):
+    for nombre in ("fija-mediana", "wf-pico", "wf-meseta", "oraculo", "buy-hold"):
         r = torneo[nombre]
         lines.append(
-            f"  {nombre:<14}  {r['roi']:>+8.2f}  ${r['profit']:>+11,.0f}  ${r['total_equity']:>11,.0f}  "
-            f"{r['buys']:>7}  {r['sells']:>6}  {r['open_positions']:>5}  ${r['total_fees']:>9,.0f}"
+            f"  {nombre:<14}  {r['roi']:>+8.2f}  {r.get('max_drawdown_pct', 0.0):>7.2f}  ${r['profit']:>+11,.0f}  ${r['total_equity']:>11,.0f}  "
+            f"{r.get('buys', 0):>7}  {r.get('sells', 0):>6}  {r.get('open_positions', 0):>5}  ${r.get('total_fees', 0.0):>9,.0f}"
         )
     lines += [
         SEP2,

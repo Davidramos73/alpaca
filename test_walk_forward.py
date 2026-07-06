@@ -250,7 +250,7 @@ def test_tournament_estructura_y_semanas_de_aplicacion():
     weekly = _weekly_sintetico(n_semanas=3)
     resultados, planes = tournament(weekly, 1, [1], 0.0, True, 10_000.0)
 
-    assert set(resultados) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    assert set(resultados) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo", "buy-hold"}
     # 3 semanas, train_weeks=1 -> 2 semanas de aplicación por estrategia
     assert all(len(p) == 2 for p in planes.values())
     # con train_weeks=1, wf-pico usa el pico de la semana anterior
@@ -278,7 +278,7 @@ def test_tournament_train_weeks_mayor_a_uno_usa_ventana_correcta():
     weekly = _weekly_sintetico(n_semanas=4)
     resultados, planes = tournament(weekly, 2, [1], 0.0, True, 10_000.0)
 
-    assert set(resultados) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    assert set(resultados) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo", "buy-hold"}
     assert all(len(p) == len(weekly) - 2 for p in planes.values())
 
     ventana_correcta = pd.concat(
@@ -307,7 +307,7 @@ def test_run_analysis_pipeline_completo():
 
     assert len(out["periods"]) == 4
     assert len(out["regret"]) == 3
-    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo", "buy-hold"}
     assert 0.01 <= out["stats"]["median_drop"] <= 0.10
     assert isinstance(out["veredicto"], str) and len(out["veredicto"]) > 0
 
@@ -344,7 +344,7 @@ def test_run_analysis_veredicto_no_se_justifica_cuando_fija_empata_adaptativas()
     out = run_analysis(df, intervals=[1], train_periods=1, fee_pct=0.0, use_pool=True, buy_amount=10_000.0)
 
     assert len(out["periods"]) == 3
-    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo", "buy-hold"}
 
     # Con esta semilla y semanas idénticas, el torneo real da un empate
     # exacto: fija-mediana == wf-pico == wf-meseta == oraculo (~-0.04% ROI)
@@ -421,7 +421,7 @@ def test_run_analysis_con_period_month_pipeline_completo():
     assert len(out["periods"]) == 4
     assert [p["wk"]["label"] for p in out["periods"]] == ["2026-M01", "2026-M02", "2026-M03", "2026-M04"]
     assert len(out["regret"]) == 3
-    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+    assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo", "buy-hold"}
     assert isinstance(out["veredicto"], str) and len(out["veredicto"]) > 0
 
 
@@ -496,3 +496,41 @@ def test_buy_hold_roi_respeta_starting_cash():
     r = buy_hold_roi(df, starting_cash=10_000.0)
     assert r["total_equity"] == pytest.approx(15_000.0)
     assert r["roi"] == pytest.approx(50.0)
+
+
+def test_tournament_incluye_buy_hold_sobre_periodos_de_aplicacion():
+    weekly = _weekly_sintetico(n_semanas=3)
+    resultados, planes = tournament(weekly, 1, [1], 0.0, True, 10_000.0)
+
+    assert "buy-hold" in resultados
+    # B&H se calcula SOLO sobre los períodos de aplicación (train_periods=1
+    # -> semanas 1 y 2), no sobre el rango completo.
+    app_df = pd.concat([weekly[1]["wk"]["df"], weekly[2]["wk"]["df"]], ignore_index=True)
+    first = float(app_df["close"].iloc[0])
+    last  = float(app_df["close"].iloc[-1])
+    assert resultados["buy-hold"]["roi"] == pytest.approx((last - first) / first * 100)
+    # buy-hold no participa de la tabla de parámetros por período
+    assert set(planes) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
+
+
+def test_veredicto_siempre_menciona_buy_hold():
+    rng = np.random.default_rng(11)
+    partes = []
+    lunes = pd.date_range("2026-01-05", periods=4, freq="7D")
+    for i in range(4):
+        prices = 100 * np.cumprod(1 + rng.normal(0, 0.01, 80))
+        partes.append(make_df(prices, start=lunes[i].strftime("%Y-%m-%d 15:00")))
+    df = pd.concat(partes, ignore_index=True)
+
+    out = run_analysis(df, intervals=[1], train_periods=1, fee_pct=0.0, use_pool=True, buy_amount=10_000.0)
+    assert "buy & hold" in out["veredicto"].lower()
+    # Consistencia dirección/texto: si el mejor ROI realista supera al B&H
+    # el texto dice que el grid le gana; si no, advierte con "OJO".
+    bh = out["torneo"]["buy-hold"]["roi"]
+    mejor_real = max(out["torneo"]["fija-mediana"]["roi"],
+                     out["torneo"]["wf-pico"]["roi"],
+                     out["torneo"]["wf-meseta"]["roi"])
+    if mejor_real > bh:
+        assert "le gana" in out["veredicto"]
+    else:
+        assert "OJO" in out["veredicto"]
