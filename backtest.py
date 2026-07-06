@@ -1,11 +1,10 @@
 import os
 import argparse
-import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+
+from optimize import STARTING_CASH, buy_hold_roi, load_bars, simulate
+
 
 def main():
     parser = argparse.ArgumentParser(description="Backtest de estrategia grid")
@@ -21,245 +20,96 @@ def main():
     parser.add_argument("--interval-minutes", type=int, default=20, help="Cada cuántos minutos 'revisa' el precio el bot simulado, igual que el parámetro --interval del bot real (default: 20)")
     args = parser.parse_args()
 
-    # Cargar variables de entorno
     load_dotenv()
-    
     api_key = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_SECRET_KEY")
-    
     if not api_key or not secret_key:
         print("Error: No se encontraron las credenciales en el archivo .env")
         return
-        
-    # 1. Obtener datos históricos (con caché local por símbolo y período)
+
     symbol     = args.symbol.upper()
     date_start = datetime.strptime(args.date_start, "%Y-%m-%d")
     date_end   = datetime.strptime(args.date_end,   "%Y-%m-%d")
-    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}_1Min.pkl"
 
     print(f"Iniciando simulación (Backtest) de {symbol}…")
     print(f"Rango: {date_start.strftime('%Y-%m-%d')} al {date_end.strftime('%Y-%m-%d')}")
 
-    if os.path.exists(cache_path):
-        print(f"Cargando datos desde caché ({cache_path})…")
-        df = pd.read_pickle(cache_path)
-    else:
-        print(f"Descargando datos históricos (1 minuto) de Alpaca para {symbol}…")
-        client = StockHistoricalDataClient(api_key, secret_key)
-        req = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
-            start=date_start,
-            end=date_end,
-        )
-        try:
-            bars = client.get_stock_bars(req)
-            df = bars.df.reset_index()
-            df.to_pickle(cache_path)
-            print(f"Datos guardados en caché ({cache_path})")
-        except Exception as e:
-            print(f"Error al obtener datos históricos: {e}")
-            return
-
-    print(f"Datos descargados: {len(df)} velas de 1 minuto.")
+    df_1min = load_bars(symbol, date_start, date_end, api_key, secret_key)
+    print(f"Datos descargados: {len(df_1min)} velas de 1 minuto.")
 
     interval_minutes = max(1, args.interval_minutes)
-    df = df.iloc[::interval_minutes].reset_index(drop=True)
+    df = df_1min.iloc[::interval_minutes].reset_index(drop=True)
     print(f"Simulando con intervalo de revisión de {interval_minutes} minuto(s): {len(df)} precios evaluados.")
 
-    # 2. Configuración de parámetros de la estrategia
-    starting_cash = 100000.0
-    cash = starting_cash
-    purchases = []  # Pila LIFO de compras: [{"price": float, "qty": float}]
-    profit_pool   = 0.0
+    buy_amount = args.buy_amount
+    fee_pct    = args.fee_pct
+    use_pool   = not args.no_profit_pool
 
-    buy_amount    = args.buy_amount
-    max_buys      = args.max_buys
-    buy_drop_pct  = args.buy_drop_pct
-    sell_rise_pct = args.sell_rise_pct
-    fee_pct       = args.fee_pct
-    use_pool      = not args.no_profit_pool
-
-    # Estadísticas del backtest
-    total_buys_count  = 0
-    total_sells_count = 0
-    total_fees        = 0.0
-    trades_log        = []
-    run_ts            = datetime.now().strftime("%Y%m%d_%H%M%S")
-
+    run_ts        = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file_path = f"backtest_{symbol}_{run_ts}.log"
+    trades_log    = []
+
     with open(log_file_path, "w", encoding="utf-8") as lf:
         lf.write(f"=== INICIO DE SIMULACIÓN HISTÓRICA {symbol} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ===\n")
-        lf.write(f"Capital Inicial: ${starting_cash:,.2f} | Buy Amount: ${buy_amount:,.2f} | Fee: {fee_pct*100:.3f}% | Pool de ganancias: {'ON' if use_pool else 'OFF'}\n")
+        lf.write(f"Capital Inicial: ${STARTING_CASH:,.2f} | Buy Amount: ${buy_amount:,.2f} | Fee: {fee_pct*100:.3f}% | Pool de ganancias: {'ON' if use_pool else 'OFF'}\n")
         lf.write("=================================================================================\n\n")
-    
-    # 3. Ejecución de la simulación barra a barra
-    for _, row in df.iterrows():
-        timestamp = row['timestamp']
-        close_price = float(row['close'])
-        
-        # Caso A: No hay compras activas. Ejecutamos la compra inicial.
-        if len(purchases) == 0:
-            free_slots   = max_buys - len(purchases)
-            bonus        = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
-            effective_buy = buy_amount + bonus
-            qty      = effective_buy / close_price
-            buy_fee  = effective_buy * fee_pct
-            cash    -= effective_buy + buy_fee
-            if use_pool:
-                profit_pool -= bonus
-            total_fees += buy_fee
-            purchase_info = {"price": close_price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy, "timestamp": timestamp}
-            purchases.append(purchase_info)
-            total_buys_count += 1
 
-            total_equity = cash + (qty * close_price)
+        def on_trade(ev):
+            trades_log.append(ev)
+            t = ev["timestamp"].strftime("%Y-%m-%d %H:%M")
+            if ev["type"] in ("BUY_INIT", "BUY_GRID"):
+                etiqueta = "COMPRA INICIAL" if ev["type"] == "BUY_INIT" else "COMPRA GRID"
+                lf.write(f"[{t}] {etiqueta}: {ev['qty']:.6f} acciones a ${ev['price']:.2f} | Fee: ${ev['fee']:.2f} | Pool: ${ev['pool']:.2f} | Efectivo: ${ev['cash']:,.2f} | Activas: {ev['open_positions']}/{args.max_buys}\n")
+            else:
+                lf.write(f"[{t}] VENTA LOTE: {ev['qty']:.6f} acciones a ${ev['price']:.2f} (Compra: ${ev['buy_price']:.2f}) | Fee: ${ev['fee']:.2f} | Ganancia neta: ${ev['profit']:+,.2f} | Pool: ${ev['pool']:.2f} | Efectivo: ${ev['cash']:,.2f} | Activas: {ev['open_positions']}/{args.max_buys}\n")
 
-            trades_log.append({
-                "type": "BUY_INIT",
-                "price": close_price,
-                "qty": qty,
-                "fee": buy_fee,
-                "cash_remaining": cash,
-                "timestamp": timestamp
-            })
+        r = simulate(df, args.max_buys, args.buy_drop_pct, args.sell_rise_pct, fee_pct,
+                     use_pool=use_pool, buy_amount=buy_amount,
+                     interval_minutes=interval_minutes, on_trade=on_trade)
 
-            with open(log_file_path, "a", encoding="utf-8") as lf:
-                lf.write(f"[{timestamp.strftime('%Y-%m-%d %H:%M')}] COMPRA INICIAL: {qty:.6f} acciones a ${close_price:.2f} (${effective_buy:.2f}) | Fee: ${buy_fee:.2f} | Pool: ${profit_pool:.2f} | Efectivo: ${cash:,.2f} | Balance Total: ${total_equity:,.2f}\n")
-            continue
-            
-        # Obtener última compra de la pila
-        last_purchase = purchases[-1]
-        last_buy_price = last_purchase["price"]
-        
-        buy_target = last_buy_price * (1.0 - buy_drop_pct)
-        sell_target = last_buy_price * (1.0 + sell_rise_pct)
-        
-        # Caso B: El precio cruzó el objetivo de compra (-5%)
-        if close_price <= buy_target:
-            if len(purchases) < max_buys:
-                free_slots    = max_buys - len(purchases)
-                bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
-                effective_buy = buy_amount + bonus
-                qty      = effective_buy / close_price
-                buy_fee  = effective_buy * fee_pct
-                cash    -= effective_buy + buy_fee
-                if use_pool:
-                    profit_pool -= bonus
-                total_fees += buy_fee
-                purchase_info = {"price": close_price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy, "timestamp": timestamp}
-                purchases.append(purchase_info)
-                total_buys_count += 1
+        bh               = buy_hold_roi(df_1min)
+        final_price      = float(df.iloc[-1]["close"])
+        remaining_shares = sum(p["qty"] for p in r["state"]["purchases"])
+        holdings_value   = remaining_shares * final_price
+        cash             = r["state"]["cash"]
 
-                holdings_val = sum(p['qty'] for p in purchases) * close_price
-                total_equity = cash + holdings_val
+        resumen = [
+            "",
+            "=================================================================================",
+            "                             RESULTADOS FINALES                                  ",
+            "=================================================================================",
+            f"Período:             {df.iloc[0]['timestamp'].strftime('%Y-%m-%d')} a {df.iloc[-1]['timestamp'].strftime('%Y-%m-%d')}",
+            f"Precio Inicial {symbol}: ${df.iloc[0]['close']:.2f}",
+            f"Precio Final {symbol}:   ${final_price:.2f}",
+            f"Capital Inicial:     ${STARTING_CASH:,.2f}",
+            f"Efectivo Final:      ${cash:,.2f}",
+            f"Valor de Acciones:   ${holdings_value:,.2f} ({remaining_shares:.6f} acciones)",
+            f"Capital Final Total: ${r['total_equity']:,.2f}",
+            f"Ganancia/Pérdida:    ${r['profit']:+,.2f}",
+            f"Retorno (ROI):       {r['roi']:+.2f}%",
+            f"Drawdown máximo:     {r['max_drawdown_pct']:.2f}%",
+            f"Buy & Hold ref.:     {bh['roi']:+.2f}%  (maxDD {bh['max_drawdown_pct']:.2f}%)",
+            f"Fee por operación:   {fee_pct*100:.3f}%",
+            f"Total Fees Pagados:  ${r['total_fees']:,.2f}",
+            f"Total de Compras:    {r['buys']}",
+            f"Total de Ventas:     {r['sells']}",
+            f"Compras Activas:     {r['open_positions']}/{args.max_buys}",
+            f"Pool de ganancias:   ${r['state']['profit_pool']:,.2f} ({'ON' if use_pool else 'OFF'})",
+            "=================================================================================",
+        ]
+        lf.write("\n".join(resumen) + "\n")
 
-                trades_log.append({
-                    "type": "BUY_GRID",
-                    "price": close_price,
-                    "qty": qty,
-                    "fee": buy_fee,
-                    "cash_remaining": cash,
-                    "timestamp": timestamp
-                })
-
-                with open(log_file_path, "a", encoding="utf-8") as lf:
-                    lf.write(f"[{timestamp.strftime('%Y-%m-%d %H:%M')}] COMPRA GRID: {qty:.6f} acciones a ${close_price:.2f} (${effective_buy:.2f}) | Fee: ${buy_fee:.2f} | Pool: ${profit_pool:.2f} | Efectivo: ${cash:,.2f} | Balance Total: ${total_equity:,.2f} | Compras activas: {len(purchases)}/{max_buys}\n")
-                
-        # Caso C: El precio cruzó el objetivo de venta (+4%)
-        elif close_price >= sell_target:
-            removed_purchase = purchases.pop()
-            qty_to_sell  = removed_purchase["qty"]
-            revenue      = qty_to_sell * close_price
-            sell_fee     = revenue * fee_pct
-            cash        += revenue - sell_fee
-            total_fees  += sell_fee
-            total_sells_count += 1
-
-            cost_basis   = removed_purchase["effective_buy"] + removed_purchase["buy_fee"]
-            profit       = (revenue - sell_fee) - cost_basis
-            if use_pool and profit > 0:
-                profit_pool += profit
-
-            holdings_val = sum(p['qty'] for p in purchases) * close_price
-            total_equity = cash + holdings_val
-
-            trades_log.append({
-                "type": "SELL",
-                "buy_price": removed_purchase["price"],
-                "sell_price": close_price,
-                "qty": qty_to_sell,
-                "fee": sell_fee,
-                "profit": profit,
-                "cash_remaining": cash,
-                "timestamp": timestamp
-            })
-
-            with open(log_file_path, "a", encoding="utf-8") as lf:
-                lf.write(f"[{timestamp.strftime('%Y-%m-%d %H:%M')}] VENTA LOTE: {qty_to_sell:.6f} acciones a ${close_price:.2f} (Compra: ${removed_purchase['price']:.2f}) | Fee: ${sell_fee:.2f} | Ganancia neta: ${profit:+,.2f} | Pool: ${profit_pool:.2f} | Efectivo: ${cash:,.2f} | Balance Total: ${total_equity:,.2f} | Activas: {len(purchases)}/{max_buys}\n")
-            
-    # 4. Resultados finales
-    final_price = float(df.iloc[-1]['close'])
-    remaining_shares = sum(p['qty'] for p in purchases)
-    holdings_value = remaining_shares * final_price
-    total_equity = cash + holdings_value
-    total_profit = total_equity - starting_cash
-    roi = (total_profit / starting_cash) * 100
-    
-    # Escribir resumen final al archivo .log
-    with open(log_file_path, "a", encoding="utf-8") as lf:
-        lf.write("\n=================================================================================\n")
-        lf.write("                             RESULTADOS FINALES                                  \n")
-        lf.write("=================================================================================\n")
-        lf.write(f"Período:             {df.iloc[0]['timestamp'].strftime('%Y-%m-%d')} a {df.iloc[-1]['timestamp'].strftime('%Y-%m-%d')}\n")
-        lf.write(f"Precio Inicial {symbol}: ${df.iloc[0]['close']:.2f}\n")
-        lf.write(f"Precio Final {symbol}:   ${final_price:.2f}\n")
-        lf.write(f"Capital Inicial:     ${starting_cash:,.2f}\n")
-        lf.write(f"Efectivo Final:      ${cash:,.2f}\n")
-        lf.write(f"Valor de Acciones:   ${holdings_value:,.2f} ({remaining_shares:.6f} acciones)\n")
-        lf.write(f"Capital Final Total: ${total_equity:,.2f}\n")
-        lf.write(f"Ganancia/Pérdida:    ${total_profit:+,.2f}\n")
-        lf.write(f"Retorno (ROI):       {roi:+.2f}%\n")
-        lf.write(f"Fee por operación:   {fee_pct*100:.3f}%\n")
-        lf.write(f"Total Fees Pagados:  ${total_fees:,.2f}\n")
-        lf.write(f"Total de Compras:    {total_buys_count}\n")
-        lf.write(f"Total de Ventas:     {total_sells_count}\n")
-        lf.write(f"Compras Activas:     {len(purchases)}/{max_buys}\n")
-        lf.write(f"Pool de ganancias:   ${profit_pool:,.2f} ({'ON' if use_pool else 'OFF'})\n")
-        lf.write("=================================================================================\n")
-
-    print("\n==================================================")
-    print("             RESULTADOS DEL BACKTEST              ")
-    print("==================================================")
-    print(f"Período:             {df.iloc[0]['timestamp'].strftime('%Y-%m-%d')} a {df.iloc[-1]['timestamp'].strftime('%Y-%m-%d')}")
-    print(f"Precio Inicial {symbol}: ${df.iloc[0]['close']:.2f}")
-    print(f"Precio Final {symbol}:   ${final_price:.2f}")
-    print("--------------------------------------------------")
-    print(f"Capital Inicial:     ${starting_cash:,.2f}")
-    print(f"Efectivo Final:      ${cash:,.2f}")
-    print(f"Valor de Acciones:   ${holdings_value:,.2f} ({remaining_shares:.6f} acciones)")
-    print(f"Capital Final Total: ${total_equity:,.2f}")
-    print("--------------------------------------------------")
-    print(f"Ganancia/Pérdida:    ${total_profit:+,.2f}")
-    print(f"Retorno (ROI):       {roi:+.2f}%")
-    print("--------------------------------------------------")
-    print(f"Fee por operación:   {fee_pct*100:.3f}%")
-    print(f"Total Fees Pagados:  ${total_fees:,.2f}")
-    print("--------------------------------------------------")
-    print(f"Total de Compras:    {total_buys_count}")
-    print(f"Total de Ventas:     {total_sells_count}")
-    print(f"Compras Activas:     {len(purchases)}/{max_buys}")
-    print(f"Pool de ganancias:   ${profit_pool:,.2f} ({'ON' if use_pool else 'OFF'})")
-    print("==================================================")
+    print("\n".join(resumen))
     print(f"Detalle completo guardado en: {log_file_path}")
-    
+
     print("\nÚltimas 10 transacciones registradas:")
     for t in trades_log[-10:]:
-        date_str = t['timestamp'].strftime('%Y-%m-%d %H:%M')
-        if "BUY" in t['type']:
-            print(f"[{date_str}] COMPRA - Precio: ${t['price']:.2f} | Acciones: {t['qty']:.4f} | Efectivo: ${t['cash_remaining']:,.2f}")
+        date_str = t["timestamp"].strftime("%Y-%m-%d %H:%M")
+        if t["type"] in ("BUY_INIT", "BUY_GRID"):
+            print(f"[{date_str}] COMPRA - Precio: ${t['price']:.2f} | Acciones: {t['qty']:.4f} | Efectivo: ${t['cash']:,.2f}")
         else:
-            print(f"[{date_str}] VENTA  - Compra: ${t['buy_price']:.2f} -> Venta: ${t['sell_price']:.2f} | Ganancia: ${t['profit']:+,.2f} | Efectivo: ${t['cash_remaining']:,.2f}")
+            print(f"[{date_str}] VENTA  - Compra: ${t['buy_price']:.2f} -> Venta: ${t['price']:.2f} | Ganancia: ${t['profit']:+,.2f} | Efectivo: ${t['cash']:,.2f}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
