@@ -199,6 +199,25 @@ def execute_buy(trading_client, symbol: str, amount: float) -> dict | None:
         return None
 
 
+def resync_state_after_failure(
+    trading_client, symbol: str, state: dict, buy_amount: float, max_buys: int, state_file: str
+) -> dict:
+    """Se llama tras una compra/venta que no devolvió confirmación (timeout u
+    otro error). La orden puede haberse ejecutado igual en Alpaca aunque el
+    bot no lo haya confirmado a tiempo; sin este resync, el estado local
+    queda desincronizado del real y el bot reintenta acciones inválidas
+    (p. ej. vender acciones que ya no tiene) en cada ciclo siguiente."""
+    reconciled = reconcile_with_broker(trading_client, symbol, state, buy_amount, max_buys)
+    if reconciled is None:
+        logging.warning(
+            "No se pudo reconciliar el estado tras el fallo. Se reintentará en el próximo ciclo."
+        )
+        return state
+    if reconciled is not state:
+        save_state(reconciled, state_file)
+    return reconciled
+
+
 def execute_sell(trading_client, symbol: str, qty: float) -> dict | None:
     logging.info(f"Enviando orden de VENTA para {symbol} de {qty:.6f} acciones...")
     try:
@@ -344,6 +363,7 @@ def main():
                     logging.info(f"Grid iniciado. Compra a ${buy_info['price']:.2f}. Pool restante: ${state['profit_pool']:.2f}")
                 else:
                     logging.error("Compra inicial FALLÓ. El grid no pudo iniciarse. Ver errores anteriores.")
+                    state = resync_state_after_failure(trading_client, symbol, state, buy_amount, max_buys, state_file)
                 time.sleep(interval)
                 continue
 
@@ -371,7 +391,8 @@ def main():
                         save_state(state, state_file)
                         logging.info(f"Compra registrada a ${buy_info['price']:.2f}. Activas: {len(purchases)}. Pool restante: ${state['profit_pool']:.2f}")
                     else:
-                        logging.error("Compra grid FALLÓ. Estado NO modificado. Ver errores anteriores.")
+                        logging.error("Compra grid FALLÓ. Ver errores anteriores.")
+                        state = resync_state_after_failure(trading_client, symbol, state, buy_amount, max_buys, state_file)
                 else:
                     logging.warning(f"Precio cayó a ${current_price:.2f} pero hay {max_buys} compras activas. Sin acción.")
 
@@ -395,7 +416,8 @@ def main():
                     else:
                         logging.info("Todos los lotes vendidos. Grid se reiniciará en el próximo ciclo.")
                 else:
-                    logging.error("Venta FALLÓ. Estado NO modificado. Ver errores anteriores.")
+                    logging.error("Venta FALLÓ. Ver errores anteriores.")
+                    state = resync_state_after_failure(trading_client, symbol, state, buy_amount, max_buys, state_file)
 
             else:
                 logging.info("Precio dentro del rango. Sin acciones.")
