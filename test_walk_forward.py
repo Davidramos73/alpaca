@@ -423,3 +423,48 @@ def test_run_analysis_con_period_month_pipeline_completo():
     assert len(out["regret"]) == 3
     assert set(out["torneo"]) == {"fija-mediana", "wf-pico", "wf-meseta", "oraculo"}
     assert isinstance(out["veredicto"], str) and len(out["veredicto"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Drawdown máximo (spec 2026-07-06-risk-mechanisms, fase 1.2)
+# ---------------------------------------------------------------------------
+
+def test_simulate_max_drawdown_basico():
+    # drop=5%, rise=5%, buy=10000, pool ON, secuencia [100, 80, 90]:
+    #   bar0: compra inicial @100 (qty 100, cash 90000) -> equity 100000
+    #   bar1: 80 <= 95, compra grid @80 (qty 125, cash 80000)
+    #         -> equity 80000 + 225*80 = 98000 -> dd = 2%
+    #   bar2: 90 >= 84 (target venta s/80), vende qty 125 (revenue 11250,
+    #         cash 91250) -> equity 91250 + 100*90 = 100250 -> pico nuevo
+    df = make_df([100, 80, 90])
+    r = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0)
+    assert r["max_drawdown_pct"] == pytest.approx(2.0)
+    assert r["state"]["equity_peak"] == pytest.approx(100_250.0)
+    assert r["state"]["max_dd"] == pytest.approx(0.02)
+
+
+def test_simulate_max_drawdown_encadenado_persiste_pico():
+    # [100, 80, 70]: bar2 compra @70 (target 76 s/80), equity final
+    # 70000 + 367.857*70 = 95750 -> dd 4.25% respecto del pico 100000.
+    # Si el pico no persistiera en state, la corrida encadenada mediría el
+    # dd del segundo tramo contra su propio primer equity (95750) y daría ~0.
+    df = make_df([100, 80, 70])
+    completo = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0)
+    assert completo["max_drawdown_pct"] == pytest.approx(4.25)
+
+    df_a = df.iloc[:2].reset_index(drop=True)
+    df_b = df.iloc[2:].reset_index(drop=True)
+    r1 = simulate(df_a, MAX_BUYS, 0.05, 0.05, 0.0)
+    r2 = simulate(df_b, MAX_BUYS, 0.05, 0.05, 0.0, state=r1["state"])
+    assert r2["max_drawdown_pct"] == pytest.approx(completo["max_drawdown_pct"])
+
+
+def test_simulate_tolera_state_viejo_sin_claves_nuevas():
+    # Un state serializado antes de este cambio no tiene equity_peak/max_dd:
+    # simulate debe tolerarlo con defaults en vez de romper con KeyError.
+    st = new_state()
+    del st["equity_peak"]
+    del st["max_dd"]
+    r = simulate(make_df(ZIGZAG), MAX_BUYS, 0.05, 0.05, 0.0, state=st)
+    assert r["roi"] == pytest.approx(1.1319148936, abs=1e-6)
+    assert "max_drawdown_pct" in r

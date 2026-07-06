@@ -29,6 +29,8 @@ def new_state(starting_cash: float = STARTING_CASH) -> dict:
         "total_buys":  0,
         "total_sells": 0,
         "total_fees":  0.0,
+        "equity_peak": starting_cash,
+        "max_dd":      0.0,
     }
 
 def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None) -> dict:
@@ -40,6 +42,8 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
     total_buys  = state["total_buys"]
     total_sells = state["total_sells"]
     total_fees  = state["total_fees"]
+    equity_peak = state.get("equity_peak", 0.0)
+    max_dd      = state.get("max_dd", 0.0)
 
     for _, row in df.iterrows():
         price = float(row["close"])
@@ -56,36 +60,43 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             total_fees += buy_fee
             purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
             total_buys += 1
-            continue
+        else:
+            last_price  = purchases[-1]["price"]
+            buy_target  = last_price * (1.0 - buy_drop_pct)
+            sell_target = last_price * (1.0 + sell_rise_pct)
 
-        last_price  = purchases[-1]["price"]
-        buy_target  = last_price * (1.0 - buy_drop_pct)
-        sell_target = last_price * (1.0 + sell_rise_pct)
+            if price <= buy_target:
+                if len(purchases) < max_buys:
+                    free_slots    = max_buys - len(purchases)
+                    bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
+                    effective_buy = buy_amount + bonus
+                    qty     = effective_buy / price
+                    buy_fee = effective_buy * fee_pct
+                    cash   -= effective_buy + buy_fee
+                    if use_pool:
+                        profit_pool -= bonus
+                    total_fees += buy_fee
+                    purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
+                    total_buys += 1
 
-        if price <= buy_target:
-            if len(purchases) < max_buys:
-                free_slots    = max_buys - len(purchases)
-                bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
-                effective_buy = buy_amount + bonus
-                qty     = effective_buy / price
-                buy_fee = effective_buy * fee_pct
-                cash   -= effective_buy + buy_fee
-                if use_pool:
-                    profit_pool -= bonus
-                total_fees += buy_fee
-                purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
-                total_buys += 1
+            elif price >= sell_target:
+                sold      = purchases.pop()
+                revenue   = sold["qty"] * price
+                sell_fee  = revenue * fee_pct
+                cash     += revenue - sell_fee
+                total_fees += sell_fee
+                total_sells += 1
+                profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
+                if use_pool and profit > 0:
+                    profit_pool += profit
 
-        elif price >= sell_target:
-            sold      = purchases.pop()
-            revenue   = sold["qty"] * price
-            sell_fee  = revenue * fee_pct
-            cash     += revenue - sell_fee
-            total_fees += sell_fee
-            total_sells += 1
-            profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
-            if use_pool and profit > 0:
-                profit_pool += profit
+        # Epílogo por vela: equity, pico y drawdown máximo
+        equity = cash + sum(p["qty"] for p in purchases) * price
+        if equity > equity_peak:
+            equity_peak = equity
+        dd = (equity_peak - equity) / equity_peak if equity_peak > 0 else 0.0
+        if dd > max_dd:
+            max_dd = dd
 
     final_price    = float(df.iloc[-1]["close"])
     holdings_value = sum(p["qty"] for p in purchases) * final_price
@@ -106,6 +117,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
         "buys":           total_buys,
         "sells":          total_sells,
         "open_positions": len(purchases),
+        "max_drawdown_pct": max_dd * 100,
         "state": {
             "cash":        cash,
             "purchases":   purchases,
@@ -113,6 +125,8 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             "total_buys":  total_buys,
             "total_sells": total_sells,
             "total_fees":  total_fees,
+            "equity_peak": equity_peak,
+            "max_dd":      max_dd,
         },
     }
 
