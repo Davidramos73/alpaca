@@ -426,6 +426,34 @@ def test_run_analysis_con_period_month_pipeline_completo():
 
 
 # ---------------------------------------------------------------------------
+# Callback on_trade (spec fase 2.7)
+# ---------------------------------------------------------------------------
+
+def test_on_trade_emite_eventos_en_orden():
+    # Con ZIGZAG la secuencia de operaciones es conocida (ver comentario
+    # arriba de ZIGZAG): init@100, grid@94, sell@99, sell@106, init@100.
+    df = make_df(ZIGZAG)
+    eventos = []
+    r = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, on_trade=eventos.append)
+
+    assert [e["type"] for e in eventos] == ["BUY_INIT", "BUY_GRID", "SELL", "SELL", "BUY_INIT"]
+    assert [e["price"] for e in eventos] == [100.0, 94.0, 99.0, 106.0, 100.0]
+
+    venta = eventos[2]
+    assert venta["buy_price"] == pytest.approx(94.0)
+    assert venta["profit"] == pytest.approx(531.9148936, abs=1e-4)
+    assert venta["timestamp"] == df["timestamp"].iloc[2]
+    assert venta["open_positions"] == 1          # quedó solo el lote de 100
+
+    assert eventos[-1]["open_positions"] == 1
+    assert eventos[-1]["pool"] == pytest.approx(1131.9148936 * 0.9, abs=1e-4)  # pool tras restar bonus pool/10
+
+    # El callback no altera el resultado numérico
+    r2 = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0)
+    assert r["roi"] == pytest.approx(r2["roi"])
+
+
+# ---------------------------------------------------------------------------
 # Drawdown máximo (spec 2026-07-06-risk-mechanisms, fase 1.2)
 # ---------------------------------------------------------------------------
 

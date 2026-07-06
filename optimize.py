@@ -33,7 +33,7 @@ def new_state(starting_cash: float = STARTING_CASH) -> dict:
         "max_dd":      0.0,
     }
 
-def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None) -> dict:
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None, on_trade=None) -> dict:
     if state is None:
         state = new_state()
     cash        = state["cash"]
@@ -60,6 +60,10 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             total_fees += buy_fee
             purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
             total_buys += 1
+            if on_trade:
+                on_trade({"type": "BUY_INIT", "price": price, "qty": qty, "fee": buy_fee,
+                          "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                          "open_positions": len(purchases)})
         else:
             last_price  = purchases[-1]["price"]
             buy_target  = last_price * (1.0 - buy_drop_pct)
@@ -78,6 +82,10 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
                     total_fees += buy_fee
                     purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
                     total_buys += 1
+                    if on_trade:
+                        on_trade({"type": "BUY_GRID", "price": price, "qty": qty, "fee": buy_fee,
+                                  "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                                  "open_positions": len(purchases)})
 
             elif price >= sell_target:
                 sold      = purchases.pop()
@@ -89,6 +97,11 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
                 profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
                 if use_pool and profit > 0:
                     profit_pool += profit
+                if on_trade:
+                    on_trade({"type": "SELL", "price": price, "qty": sold["qty"], "fee": sell_fee,
+                              "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                              "open_positions": len(purchases),
+                              "buy_price": sold["price"], "profit": profit})
 
         # Epílogo por vela: equity, pico y drawdown máximo
         equity = cash + sum(p["qty"] for p in purchases) * price
