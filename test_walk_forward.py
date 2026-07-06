@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from optimize import simulate, new_state, MAX_BUYS
+from optimize import simulate, new_state, MAX_BUYS, buy_hold_roi
 from walk_forward import (
     lag1_corr,
     median_params,
@@ -468,3 +468,31 @@ def test_simulate_tolera_state_viejo_sin_claves_nuevas():
     r = simulate(make_df(ZIGZAG), MAX_BUYS, 0.05, 0.05, 0.0, state=st)
     assert r["roi"] == pytest.approx(1.1319148936, abs=1e-6)
     assert "max_drawdown_pct" in r
+
+
+# ---------------------------------------------------------------------------
+# Buy & hold de referencia (spec fase 1.1)
+# ---------------------------------------------------------------------------
+
+def test_buy_hold_roi_serie_que_sube():
+    df = make_df([100, 110, 120])
+    r = buy_hold_roi(df)
+    assert r["roi"] == pytest.approx(20.0)
+    assert r["profit"] == pytest.approx(20_000.0)
+    assert r["total_equity"] == pytest.approx(120_000.0)
+    assert r["max_drawdown_pct"] == pytest.approx(0.0)
+
+
+def test_buy_hold_roi_con_drawdown():
+    # 100 -> 80 (dd 20%) -> 110 (cierra +10%)
+    df = make_df([100, 80, 110])
+    r = buy_hold_roi(df)
+    assert r["roi"] == pytest.approx(10.0)
+    assert r["max_drawdown_pct"] == pytest.approx(20.0)
+
+
+def test_buy_hold_roi_respeta_starting_cash():
+    df = make_df([100, 150])
+    r = buy_hold_roi(df, starting_cash=10_000.0)
+    assert r["total_equity"] == pytest.approx(15_000.0)
+    assert r["roi"] == pytest.approx(50.0)

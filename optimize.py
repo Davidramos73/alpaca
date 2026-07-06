@@ -130,6 +130,25 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
         },
     }
 
+def buy_hold_roi(df: pd.DataFrame, starting_cash: float = STARTING_CASH) -> dict:
+    """Referencia buy & hold: invierte todo el capital al primer close del
+    rango y valúa al último. Sin fees (referencia teórica). Devuelve las
+    mismas claves de métricas que simulate() para poder mezclar en tablas."""
+    closes = df["close"].astype(float)
+    qty    = starting_cash / closes.iloc[0]
+    equity = qty * closes
+    peak   = equity.cummax()
+    max_dd = float(((peak - equity) / peak).max())
+
+    total_equity = float(equity.iloc[-1])
+    profit       = total_equity - starting_cash
+    return {
+        "roi":              (profit / starting_cash) * 100,
+        "profit":           profit,
+        "total_equity":     total_equity,
+        "max_drawdown_pct": max_dd * 100,
+    }
+
 # ---------------------------------------------------------------------------
 # Carga de datos históricos (con caché en disco)
 # ---------------------------------------------------------------------------
