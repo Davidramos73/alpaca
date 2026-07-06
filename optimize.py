@@ -234,6 +234,7 @@ def main():
     periodo_end   = df_1min.iloc[-1]["timestamp"].strftime("%Y-%m-%d")
     precio_inicio = float(df_1min.iloc[0]["close"])
     precio_fin    = float(df_1min.iloc[-1]["close"])
+    bh            = buy_hold_roi(df_1min)
     best          = results[0]
     worst         = results[-1]
 
@@ -271,6 +272,7 @@ def main():
         sep,
         f"  Período analizado:  {periodo_start}  →  {periodo_end}",
         f"  Precio {symbol} inicio: ${precio_inicio:.2f}   |   Precio {symbol} fin: ${precio_fin:.2f}",
+        f"  Buy & Hold referencia: {bh['roi']:+.2f}%  (maxDD {bh['max_drawdown_pct']:.2f}%)",
         f"  Velas de 1 minuto:  {len(df_1min)}",
         f"  Intervalos evaluados (min): {intervals}",
         f"  Capital inicial:    ${STARTING_CASH:,.2f}   |   Monto por compra: ${buy_amount:,.2f}",
