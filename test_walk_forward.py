@@ -647,3 +647,58 @@ def test_slots_reservados_pivot_se_renueva_tras_vaciar_pila():
     assert r["buys"] == 5
     assert r["sells"] == 2
     assert [p["price"] for p in r["state"]["purchases"]] == [100.0, 95.0, 79.0]
+
+
+# ---------------------------------------------------------------------------
+# Mecanismo anti-crash: circuit breaker congelador (spec fase 2.4)
+# ---------------------------------------------------------------------------
+
+def _estado_cargado():
+    # 9 lotes @100 (900 acciones) + 10k cash; pico previo de equity 100k.
+    st = new_state()
+    st["cash"] = 10_000.0
+    st["purchases"] = [
+        {"price": 100.0, "qty": 100.0, "buy_fee": 0.0, "effective_buy": 10_000.0}
+        for _ in range(9)
+    ]
+    st["total_buys"] = 9
+    st["equity_peak"] = 100_000.0
+    return st
+
+
+def test_breaker_congela_y_descongela_con_histeresis():
+    # T=15% (rearme < 7.5%), max_buys=20, drop 5% rise 5%,
+    # precios [80, 76, 84, 95, 94] partiendo de _estado_cargado():
+    #   bar0 @80: compra grid @80 (cash 0, 1025 acc) -> equity 82000,
+    #        dd 18% > 15% -> congela AL FINAL de la vela.
+    #   bar1 @76: 76<=76 (target s/80) pero CONGELADO -> bloqueada.
+    #        equity 77900 -> max_dd 22.1%.
+    #   bar2 @84: venta lote 80 (84>=84) -- las ventas siguen congelado.
+    #        equity 10500+900*84=86100, dd 13.9% > 7.5% -> sigue congelado.
+    #   bar3 @95: 95<=95 (target s/100) pero sigue congelado en esta vela;
+    #        equity 96000, dd 4% < 7.5% -> descongela al final (histéresis:
+    #        el cruce surte efecto en la vela siguiente).
+    #   bar4 @94: 94<=95 -> compra permitida.
+    df = make_df([80, 76, 84, 95, 94])
+    r = simulate(df, 20, 0.05, 0.05, 0.0, state=_estado_cargado(), breaker_dd_pct=0.15)
+    assert r["buys"] == 11          # 9 previas + @80 + @94
+    assert r["sells"] == 1
+    assert r["state"]["frozen"] is False
+    assert r["max_drawdown_pct"] == pytest.approx(22.1)
+
+    # Sin breaker, la compra de bar1 @76 también entra
+    sin = simulate(df, 20, 0.05, 0.05, 0.0, state=_estado_cargado())
+    assert sin["buys"] == 12
+
+
+def test_breaker_bloquea_compra_inicial_congelado():
+    # Pila vacía + congelado con dd 50% (>> T/2): el re-pivot también se
+    # bloquea mientras el breaker esté activo.
+    st = new_state()
+    st["cash"] = 50_000.0
+    st["equity_peak"] = 100_000.0
+    st["frozen"] = True
+    df = make_df([100, 100, 100])
+    r = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, state=st, breaker_dd_pct=0.15)
+    assert r["buys"] == 0
+    assert r["state"]["frozen"] is True

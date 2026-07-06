@@ -32,6 +32,7 @@ def new_state(starting_cash: float = STARTING_CASH) -> dict:
         "equity_peak": starting_cash,
         "max_dd":      0.0,
         "cooldown_remaining_min": 0.0,
+        "frozen":      False,
     }
 
 def can_buy(purchases: list, max_buys: int, price: float, *,
@@ -56,7 +57,7 @@ def can_buy(purchases: list, max_buys: int, price: float, *,
             return False
     return True
 
-def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None, on_trade=None, cooldown_minutes: float = 0.0, reserved_slots: int = 0, deep_drop_pct: float = 0.0) -> dict:
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None, on_trade=None, cooldown_minutes: float = 0.0, reserved_slots: int = 0, deep_drop_pct: float = 0.0, breaker_dd_pct: float = 0.0) -> dict:
     if state is None:
         state = new_state()
     cash        = state["cash"]
@@ -68,6 +69,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
     equity_peak = state.get("equity_peak", 0.0)
     max_dd      = state.get("max_dd", 0.0)
     cooldown_remaining = state.get("cooldown_remaining_min", 0.0)
+    frozen      = state.get("frozen", False) if breaker_dd_pct > 0 else False
 
     for _, row in df.iterrows():
         price = float(row["close"])
@@ -76,21 +78,22 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             cooldown_remaining = max(0.0, cooldown_remaining - interval_minutes)
 
         if len(purchases) == 0:
-            free_slots    = max_buys - len(purchases)
-            bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
-            effective_buy = buy_amount + bonus
-            qty     = effective_buy / price
-            buy_fee = effective_buy * fee_pct
-            cash   -= effective_buy + buy_fee
-            if use_pool:
-                profit_pool -= bonus
-            total_fees += buy_fee
-            purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
-            total_buys += 1
-            if on_trade:
-                on_trade({"type": "BUY_INIT", "price": price, "qty": qty, "fee": buy_fee,
-                          "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
-                          "open_positions": len(purchases)})
+            if not frozen:
+                free_slots    = max_buys - len(purchases)
+                bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
+                effective_buy = buy_amount + bonus
+                qty     = effective_buy / price
+                buy_fee = effective_buy * fee_pct
+                cash   -= effective_buy + buy_fee
+                if use_pool:
+                    profit_pool -= bonus
+                total_fees += buy_fee
+                purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
+                total_buys += 1
+                if on_trade:
+                    on_trade({"type": "BUY_INIT", "price": price, "qty": qty, "fee": buy_fee,
+                              "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                              "open_positions": len(purchases)})
         else:
             last_price  = purchases[-1]["price"]
             buy_target  = last_price * (1.0 - buy_drop_pct)
@@ -98,6 +101,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
 
             if price <= buy_target:
                 if can_buy(purchases, max_buys, price,
+                           frozen=frozen,
                            cooldown_remaining_min=cooldown_remaining,
                            reserved_slots=reserved_slots,
                            deep_drop_pct=deep_drop_pct):
@@ -143,6 +147,12 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
         if dd > max_dd:
             max_dd = dd
 
+        if breaker_dd_pct > 0:
+            if not frozen and dd > breaker_dd_pct:
+                frozen = True
+            elif frozen and dd < breaker_dd_pct / 2:
+                frozen = False
+
     final_price    = float(df.iloc[-1]["close"])
     holdings_value = sum(p["qty"] for p in purchases) * final_price
     total_equity   = cash + holdings_value
@@ -173,6 +183,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             "equity_peak": equity_peak,
             "max_dd":      max_dd,
             "cooldown_remaining_min": cooldown_remaining,
+            "frozen":      frozen,
         },
     }
 
