@@ -31,9 +31,32 @@ def new_state(starting_cash: float = STARTING_CASH) -> dict:
         "total_fees":  0.0,
         "equity_peak": starting_cash,
         "max_dd":      0.0,
+        "cooldown_remaining_min": 0.0,
     }
 
-def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None, on_trade=None) -> dict:
+def can_buy(purchases: list, max_buys: int, price: float, *,
+            frozen: bool = False,
+            cooldown_remaining_min: float = 0.0,
+            reserved_slots: int = 0,
+            deep_drop_pct: float = 0.0) -> bool:
+    """Decide si una compra está permitida dados los mecanismos anti-crash.
+    Con todos los mecanismos apagados replica las reglas actuales del grid.
+    La compra inicial (pila vacía) solo puede bloquearla el breaker."""
+    if frozen:
+        return False
+    if len(purchases) == 0:
+        return True
+    if len(purchases) >= max_buys:
+        return False
+    if cooldown_remaining_min > 0:
+        return False
+    if reserved_slots > 0 and len(purchases) >= max_buys - reserved_slots:
+        pivot = purchases[0]["price"]
+        if price > pivot * (1.0 - deep_drop_pct):
+            return False
+    return True
+
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None, on_trade=None, cooldown_minutes: float = 0.0) -> dict:
     if state is None:
         state = new_state()
     cash        = state["cash"]
@@ -44,9 +67,13 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
     total_fees  = state["total_fees"]
     equity_peak = state.get("equity_peak", 0.0)
     max_dd      = state.get("max_dd", 0.0)
+    cooldown_remaining = state.get("cooldown_remaining_min", 0.0)
 
     for _, row in df.iterrows():
         price = float(row["close"])
+
+        if cooldown_remaining > 0:
+            cooldown_remaining = max(0.0, cooldown_remaining - interval_minutes)
 
         if len(purchases) == 0:
             free_slots    = max_buys - len(purchases)
@@ -70,7 +97,8 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             sell_target = last_price * (1.0 + sell_rise_pct)
 
             if price <= buy_target:
-                if len(purchases) < max_buys:
+                if can_buy(purchases, max_buys, price,
+                           cooldown_remaining_min=cooldown_remaining):
                     free_slots    = max_buys - len(purchases)
                     bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
                     effective_buy = buy_amount + bonus
@@ -86,6 +114,8 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
                         on_trade({"type": "BUY_GRID", "price": price, "qty": qty, "fee": buy_fee,
                                   "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
                                   "open_positions": len(purchases)})
+                    if cooldown_minutes > 0:
+                        cooldown_remaining = float(cooldown_minutes)
 
             elif price >= sell_target:
                 sold      = purchases.pop()
@@ -140,6 +170,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             "total_fees":  total_fees,
             "equity_peak": equity_peak,
             "max_dd":      max_dd,
+            "cooldown_remaining_min": cooldown_remaining,
         },
     }
 

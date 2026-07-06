@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from optimize import simulate, new_state, MAX_BUYS, buy_hold_roi
+from optimize import simulate, new_state, MAX_BUYS, buy_hold_roi, can_buy
 from walk_forward import (
     lag1_corr,
     median_params,
@@ -562,3 +562,50 @@ def test_veredicto_siempre_menciona_buy_hold():
         assert "le gana" in out["veredicto"]
     else:
         assert "OJO" in out["veredicto"]
+
+
+# ---------------------------------------------------------------------------
+# Mecanismo anti-crash: cooldown temporal (spec fase 2.2)
+# ---------------------------------------------------------------------------
+
+def test_can_buy_cooldown_y_pila():
+    compras = [{"price": 100.0, "qty": 1.0}]
+    assert can_buy(compras, 10, 90.0)
+    assert not can_buy(compras, 10, 90.0, cooldown_remaining_min=1.0)
+    assert can_buy([], 10, 90.0, cooldown_remaining_min=5.0)   # compra inicial ignora cooldown
+    assert not can_buy(compras * 10, 10, 90.0)                 # pila llena
+
+
+def test_cooldown_bloquea_compras_hasta_vencer():
+    # interval=1, cooldown=2 min, drop 5% rise 5%, [100, 94, 88, 83, 78]:
+    #   sin cooldown compra en cada vela (5 compras).
+    #   con cooldown: init@100, grid@94 (arranca cooldown=2),
+    #   88 bloqueada (resta 1), 83 compra (resta 0), 78 bloqueada (resta 1).
+    df = make_df([100, 94, 88, 83, 78])
+    sin = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0)
+    con = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, cooldown_minutes=2)
+    assert sin["buys"] == 5
+    assert con["buys"] == 3
+    assert [p["price"] for p in con["state"]["purchases"]] == [100.0, 94.0, 83.0]
+
+
+def test_cooldown_persiste_entre_llamadas_encadenadas():
+    df = make_df([100, 94, 88, 83, 78])
+    a = df.iloc[:3].reset_index(drop=True)
+    b = df.iloc[3:].reset_index(drop=True)
+    completo = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, cooldown_minutes=2)
+    r1 = simulate(a, MAX_BUYS, 0.05, 0.05, 0.0, cooldown_minutes=2)
+    r2 = simulate(b, MAX_BUYS, 0.05, 0.05, 0.0, cooldown_minutes=2, state=r1["state"])
+    assert r2["buys"] == completo["buys"] == 3
+    assert r2["total_equity"] == pytest.approx(completo["total_equity"])
+
+
+def test_cooldown_no_afecta_compra_inicial_ni_ventas():
+    # init@100, grid@94 (cooldown=10 arranca), 99>=98.7 vende lote de 94,
+    # 105.1>=105 vende lote de 100 (pila vacía), re-pivot @100 pese al
+    # cooldown vigente. Ventas nunca bloqueadas, re-pivot tampoco.
+    df = make_df([100, 94, 99, 105.1, 100])
+    r = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, cooldown_minutes=10)
+    assert r["buys"] == 3
+    assert r["sells"] == 2
+    assert r["open_positions"] == 1
