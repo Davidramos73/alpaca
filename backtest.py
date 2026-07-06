@@ -18,6 +18,10 @@ def main():
     parser.add_argument("--fee-pct", type=float, default=0.0, help="Fee por operación sobre el monto (default: 0.0). Ej: 0.001 = 0.1%%")
     parser.add_argument("--no-profit-pool", action="store_true", help="Desactivar reinversión de ganancias (modo clásico)")
     parser.add_argument("--interval-minutes", type=int, default=20, help="Cada cuántos minutos 'revisa' el precio el bot simulado, igual que el parámetro --interval del bot real (default: 20)")
+    parser.add_argument("--cooldown-minutes", type=float, default=0.0, help="Minutos de mercado sin comprar tras cada compra de grid (default: 0 = apagado)")
+    parser.add_argument("--reserved-slots",   type=int,   default=0,   help="Slots finales reservados para caídas profundas (default: 0 = apagado)")
+    parser.add_argument("--deep-drop-pct",    type=float, default=0.0, help="Caída mínima desde el pivot para usar los slots reservados. Ej: 0.25 = 25%%")
+    parser.add_argument("--breaker-dd-pct",   type=float, default=0.0, help="Umbral de drawdown del equity que congela compras (default: 0 = apagado). Ej: 0.15 = 15%%")
     args = parser.parse_args()
 
     load_dotenv()
@@ -65,7 +69,11 @@ def main():
 
         r = simulate(df, args.max_buys, args.buy_drop_pct, args.sell_rise_pct, fee_pct,
                      use_pool=use_pool, buy_amount=buy_amount,
-                     interval_minutes=interval_minutes, on_trade=on_trade)
+                     interval_minutes=interval_minutes, on_trade=on_trade,
+                     cooldown_minutes=args.cooldown_minutes,
+                     reserved_slots=args.reserved_slots,
+                     deep_drop_pct=args.deep_drop_pct,
+                     breaker_dd_pct=args.breaker_dd_pct)
 
         bh               = buy_hold_roi(df_1min)
         final_price      = float(df.iloc[-1]["close"])
