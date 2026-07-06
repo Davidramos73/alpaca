@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from optimize import simulate, new_state, MAX_BUYS, buy_hold_roi, can_buy
+from risk_tournament import build_variants
 from walk_forward import (
     lag1_corr,
     median_params,
@@ -702,3 +703,22 @@ def test_breaker_bloquea_compra_inicial_congelado():
     r = simulate(df, MAX_BUYS, 0.05, 0.05, 0.0, state=st, breaker_dd_pct=0.15)
     assert r["buys"] == 0
     assert r["state"]["frozen"] is True
+
+
+# ---------------------------------------------------------------------------
+# risk_tournament (spec fase 2.6)
+# ---------------------------------------------------------------------------
+
+def test_build_variants_matriz_completa():
+    vs = build_variants()
+    assert len(vs) == 10                       # 1 baseline + 3 cooldown + 4 reserva + 2 breaker
+    assert vs[0] == {"name": "baseline", "params": {}}
+    names = [v["name"] for v in vs]
+    assert len(set(names)) == 10
+    params = [v["params"] for v in vs]
+    assert {"cooldown_minutes": 390} in params
+    assert {"cooldown_minutes": 1950} in params
+    assert {"reserved_slots": 2, "deep_drop_pct": 0.20} in params
+    assert {"reserved_slots": 3, "deep_drop_pct": 0.30} in params
+    assert {"breaker_dd_pct": 0.15} in params
+    assert {"breaker_dd_pct": 0.25} in params
