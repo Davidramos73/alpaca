@@ -134,10 +134,11 @@ python walk_forward.py \
   --date-start 2026-01-01 \
   --date-end 2026-07-03 \
   --intervals 20 \
-  --train-weeks 1
+  --period month \
+  --train-periods 1
 ```
 
-Parte el histórico en semanas, mide cuánto varían los parámetros óptimos semana a semana y compara en un torneo (con un solo portfolio continuo, sin liquidar posiciones al cambiar de parámetros) cuatro estrategias: parámetros fijos por mediana histórica, auto-ajuste semanal usando el pico del grid, una variante robusta por meseta, y un oráculo teórico con lookahead. Genera `walkforward_<symbol>_<timestamp>.log` (con un veredicto explícito sobre si el auto-ajuste se justifica) y `.csv` (historial de parámetros óptimos por semana).
+Parte el histórico en períodos (semanas o meses, según `--period week|month`, default `week`), mide cuánto varían los parámetros óptimos de un período a otro y compara en un torneo (con un solo portfolio continuo, sin liquidar posiciones al cambiar de parámetros) cuatro estrategias: parámetros fijos por mediana histórica, auto-ajuste periódico usando el pico del grid, una variante robusta por meseta, y un oráculo teórico con lookahead. Genera `walkforward_<symbol>_<timestamp>.log` (con un veredicto explícito sobre si el auto-ajuste se justifica) y `.csv` (historial de parámetros óptimos por período).
 
 ### Tests
 
