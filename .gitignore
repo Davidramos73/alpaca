@@ -7,3 +7,6 @@ data/
 optimize_*.csv
 backtest_*.log
 *_state.json
+walkforward_*.csv
+risktournament_*.csv
+__pycache__/

@@ -161,6 +161,48 @@ python3 walk_forward.py --symbol MSFT --date-start 2024-07-01 --date-end 2026-07
 ```
 Artefactos: `walkforward_NVDA_20260706_093706.log` / `.csv` (caché `cache_NVDA_20240701_20260701_1Min.pkl`, 477,212 velas), `walkforward_MSFT_20260706_093703.log` / `.csv` (caché `cache_MSFT_20240701_20260701_1Min.pkl`, 341,866 velas)
 
+### 9. Torneo de mecanismos anti-crash (risk_tournament.py) — 4 símbolos
+
+**Primera corrida real de los tres mecanismos de freno (cooldown temporal, slots reservados por profundidad, circuit breaker) diseñados a partir del hallazgo #2 de esta bitácora (rally-y-crash rompe el grid). Resultado: el cooldown es el mecanismo más efectivo para cortar el drawdown en los símbolos con crash (MSFT, SPCX), y el circuit breaker resultó completamente inerte en las cuatro corridas.**
+
+Comparación baseline (grid sin frenos, drop 1% / rise 3% / intervalo 20) vs. la variante que más redujo el maxDD (ΔmaxDD) vs. buy & hold, en las 4 corridas exactas del comando de abajo:
+
+| Símbolo | Baseline (ROI / maxDD) | Mejor variante por ΔmaxDD | ROI / maxDD (Δ vs. baseline) | Buy & hold (ROI / maxDD) |
+|---|---|---|---|---|
+| TSLA | +61.27% / 35.01% | cooldown-1950min | +47.98% / 33.25% (ΔROI -13.29pp, ΔmaxDD +1.76pp) | +109.48% / 55.93% |
+| NVDA | +57.82% / 28.30% | cooldown-1950min | +60.49% / 23.20% (ΔROI +2.67pp, ΔmaxDD +5.10pp) | +60.76% / 43.47% |
+| MSFT | -9.94% / 27.97% | reserva-3slots-30pct | -10.00% / 23.34% (ΔROI -0.07pp, ΔmaxDD +4.63pp) | -16.14% / 37.83% |
+| SPCX | -8.93% / 21.36% | cooldown-1950min | +1.15% / 4.85% (ΔROI +10.07pp, ΔmaxDD +16.51pp) | +6.22% / 34.60% |
+
+(Todas: buy-amount $10,000, fee 0%, pool ON, max_buys 10. TSLA/NVDA/MSFT con 2 años de historia solicitados 2024-07-01→2026-07-01, rango real evaluado por el caché 2024-07-01→2026-06-30; SPCX con datos reales disponibles solo desde el 2026-06-12 dentro del rango pedido 2026-01-01→2026-07-03, igual que en la entrada #7.)
+
+**El caso más contundente es SPCX**, el símbolo que en la entrada #7 mostró que el rally-crash rompía la estrategia hasta el punto de que el Oráculo daba negativo: acá `cooldown-1950min` no solo recorta el maxDD de 21.36% a 4.85% (-16.51pp) sino que además invierte el signo del ROI, de -8.93% a +1.15%. En MSFT (el otro símbolo con el mismo patrón de rally-y-crash, hallazgo #8) el mecanismo que más protege es distinto: `reserva-3slots-30pct`, que recorta el maxDD de 27.97% a 23.34% (-4.63pp) a un costo de ROI prácticamente nulo (-0.07pp, dentro del margen de ruido).
+
+**La pregunta acordada era cuál mecanismo protege más en SPCX/MSFT costando menos pp de ROI en TSLA/NVDA — y ahí la respuesta es más matizada.** Mirando el mismo mecanismo (cooldown) en los cuatro símbolos (ΔROI / ΔmaxDD en pp):
+
+| Variante | TSLA | NVDA | MSFT | SPCX |
+|---|---|---|---|---|
+| cooldown-390min | -0.66 / +0.74 | +10.45 / +0.47 | +1.22 / +1.40 | +6.82 / +7.22 |
+| cooldown-780min | -7.61 / -0.78 | +14.09 / +2.48 | +2.05 / +1.54 | +8.22 / +11.72 |
+| cooldown-1950min | -13.29 / +1.76 | +2.67 / +5.10 | +0.77 / +1.79 | +10.07 / +16.51 |
+
+`cooldown-1950min` da la mayor protección absoluta en SPCX (+16.51pp de maxDD) y sigue siendo positivo en NVDA (+2.67pp de ROI), pero en TSLA cuesta -13.29pp de ROI — no es "poco costo". `cooldown-390min`, en cambio, es prácticamente gratis o positivo en los dos símbolos sanos (TSLA -0.66pp, NVDA +10.45pp) y todavía aporta protección real en los símbolos con crash (SPCX +7.22pp de maxDD, MSFT +1.40pp), aunque bastante menor que la de 1950min. O sea: hay un trade-off claro entre cuánto cooldown usar — más cooldown protege más pero cuesta más en TSLA, no hay un punto que sea simultáneamente "el que más protege" y "el más barato".
+
+Los mecanismos de slots reservados (`reserva-Nslots-Xpct`) muestran el mismo patrón de trade-off pero en general son menos efectivos que el cooldown largo para SPCX (máximo +4.09pp de maxDD con `reserva-3slots-30pct`, contra +16.51pp de `cooldown-1950min`) — con la excepción de MSFT, donde `reserva-3slots-30pct` es la mejor opción de las 8 variantes evaluadas.
+
+**El circuit breaker (`breaker-15pct`, `breaker-25pct`) no tuvo ningún efecto en ninguna de las 4 corridas** — ΔROI y ΔmaxDD dieron exactamente 0.00/0.00 en las 8 filas (2 variantes × 4 símbolos). Revisando `can_buy()`/`simulate()` en `optimize.py`: el breaker solo actúa congelando nuevas compras (`frozen=True`) cuando el drawdown supera el umbral, pero en estas 4 corridas el portfolio ya estaba con las 10 posiciones abiertas al tope (columna `Open` = 10 tanto en baseline como en ambas variantes de breaker, en los 4 símbolos) para cuando el drawdown cruzó 15%/25% — es decir, `can_buy()` ya bloqueaba la compra por cupo lleno (`len(purchases) >= max_buys`) antes de que el freeze pudiera aportar algo. El breaker, tal como está calibrado acá, resultó redundante con el techo de `max_buys` en estos 4 casos concretos; no se puede descartar que sea útil en un escenario donde el drawdown fuerte ocurra con el portfolio todavía no lleno.
+
+**Veredicto provisorio: ningún mecanismo es un default obvio para `tradebot.py` todavía.** El candidato más razonable como "seguro barato" es `cooldown-390min` (390 min ≈ 6.5 h): no cuesta nada en TSLA, mejora ROI en NVDA/MSFT/SPCX, y recorta maxDD de forma real (aunque modesta) en los dos símbolos con crash. `cooldown-1950min` protege mucho más en el peor caso (SPCX) pero su costo de -13.29pp de ROI en TSLA es demasiado alto para adoptarlo como parámetro fijo sin más evidencia — sería más sensato pensarlo como un parámetro configurable por símbolo/régimen que como default único. Con un solo rango de fechas por símbolo (sin walk-forward de estos mecanismos) esto sigue siendo una señal inicial, no una conclusión firme — antes de tocar `tradebot.py` convendría repetir esta comparación con más rangos de fechas (igual que se hizo con el hallazgo de auto-ajuste) para confirmar que el patrón se sostiene y no es específico de estos 2 años.
+
+Comandos:
+```
+python3 risk_tournament.py --symbol TSLA --date-start 2024-07-01 --date-end 2026-07-01
+python3 risk_tournament.py --symbol NVDA --date-start 2024-07-01 --date-end 2026-07-01
+python3 risk_tournament.py --symbol MSFT --date-start 2024-07-01 --date-end 2026-07-01
+python3 risk_tournament.py --symbol SPCX --date-start 2026-01-01 --date-end 2026-07-03
+```
+Artefactos: `risktournament_TSLA_20260706_191725.log`/`.csv`, `risktournament_NVDA_20260706_191739.log`/`.csv`, `risktournament_MSFT_20260706_191821.log`/`.csv`, `risktournament_SPCX_20260706_191828.log`/`.csv` (cachés reutilizados, sin red: `cache_TSLA_20240701_20260701_1Min.pkl`, `cache_NVDA_20240701_20260701_1Min.pkl`, `cache_MSFT_20240701_20260701_1Min.pkl`, `cache_SPCX_20260101_20260703_1Min.pkl`).
+
 ## Conclusiones provisorias (a validar con más datos)
 
 1. **Para TSLA con granularidad semanal, el auto-ajuste NO ayuda — confirmado en tres muestras crecientes (27, 53 y 79 semanas), con la autocorrelación oscilando cerca de 0 en las dos más grandes.** Es la conclusión más sólida de la bitácora hasta ahora. Falta ver si se sostiene en otros símbolos.
@@ -177,7 +219,8 @@ Artefactos: `walkforward_NVDA_20260706_093706.log` / `.csv` (caché `cache_NVDA_
 - [x] Repetir `--period month` con más años de historia para ver si "mensual favorece al auto-ajuste" es señal real o ruido de 12 períodos. — Hecho 2026-07-06 con 24 y 36 meses: se confirma en ambas, WF-meseta le gana a Fija-mediana por ~15-17pp (ver hallazgos #5 y #6 arriba). Ya no es ruido de muestra chica.
 - [x] Repetir `--period month` en 1-2 símbolos más (no solo TSLA) para ver si "mensual favorece al auto-ajuste" es un efecto general. — Hecho 2026-07-06 con NVDA y MSFT (2 años cada uno): el auto-ajuste mensual se sostiene en los tres símbolos, pero cuál variante gana (pico vs meseta) varía por símbolo — ver hallazgo #8 y conclusión #6.
 - [ ] Investigar por qué gana WF-pico en NVDA/MSFT pero WF-meseta en TSLA — ¿hay alguna característica del símbolo (volatilidad, tendencia, liquidez) que prediga cuál variante conviene? Todavía no hay hipótesis, solo el dato de que varía.
-- [ ] El patrón de "movimientos de tendencia fuerte rompen el grid" ya se repitió dos veces (SPCX y MSFT) — vale la pena evaluar diseñar un mecanismo de freno (fuera del alcance de `walk_forward.py`; sería un cambio en `tradebot.py`/`backtest.py`), en vez de seguir tratándolo como hallazgo aislado.
+- [x] El patrón de "movimientos de tendencia fuerte rompen el grid" ya se repitió dos veces (SPCX y MSFT) — vale la pena evaluar diseñar un mecanismo de freno (fuera del alcance de `walk_forward.py`; sería un cambio en `tradebot.py`/`backtest.py`), en vez de seguir tratándolo como hallazgo aislado. — Hecho 2026-07-06: se diseñaron e implementaron tres mecanismos (cooldown, slots reservados, circuit breaker) y se corrió `risk_tournament.py` en los 4 símbolos. `cooldown-1950min` protege más (hasta +16.51pp de maxDD en SPCX) pero cuesta caro en TSLA (-13.29pp de ROI); `cooldown-390min` es más barato pero protege menos. El breaker no tuvo ningún efecto en ninguna corrida. Ver entrada #9.
+- [ ] Repetir el torneo de mecanismos anti-crash (`risk_tournament.py`) en más rangos de fechas por símbolo para confirmar si `cooldown-390min` (el trade-off más barato encontrado hasta ahora) sigue protegiendo de forma consistente antes de considerarlo default en `tradebot.py` — con una sola ventana de 2 años por símbolo todavía es una señal inicial (ver entrada #9).
 - [ ] Repetir SPCX con más historia si Alpaca la tiene disponible, para ver si el patrón de rally-crash de esas 4 semanas fue representativo del símbolo o específico de ese momento.
 - [ ] Armar el filtro rápido de "recorrido total de precio vs. desplazamiento neto" (conclusión #4) para preseleccionar candidatos antes de correr walk-forward completo símbolo por símbolo — todavía no construido.
 
@@ -185,6 +228,10 @@ Artefactos: `walkforward_NVDA_20260706_093706.log` / `.csv` (caché `cache_NVDA_
 
 | Fecha | Símbolo | Rango | Intervalos | period / train | Veredicto | Notas |
 |---|---|---|---|---|---|---|
+| 2026-07-06 | TSLA | 2024-07-01 → 2026-06-30 | 20 | — (risk_tournament, sin period) | Mejor por ΔmaxDD: cooldown-1950min (maxDD 35.01%→33.25%, ΔmaxDD +1.76pp) pero cuesta ΔROI -13.29pp | Torneo de mecanismos anti-crash (Task 11/12), no walk-forward. Breaker sin efecto (Δ 0/0) — ver entrada #9 |
+| 2026-07-06 | NVDA | 2024-07-01 → 2026-06-30 | 20 | — (risk_tournament, sin period) | Mejor por ΔmaxDD: cooldown-1950min (maxDD 28.30%→23.20%, ΔmaxDD +5.10pp) y además ΔROI +2.67pp | Torneo de mecanismos anti-crash. Breaker sin efecto (Δ 0/0) — ver entrada #9 |
+| 2026-07-06 | MSFT | 2024-07-01 → 2026-06-30 | 20 | — (risk_tournament, sin period) | Mejor por ΔmaxDD: reserva-3slots-30pct (maxDD 27.97%→23.34%, ΔmaxDD +4.63pp) a costo casi nulo (ΔROI -0.07pp) | Torneo de mecanismos anti-crash. Breaker sin efecto (Δ 0/0) — ver entrada #9 |
+| 2026-07-06 | SPCX | 2026-01-01 → 2026-07-03 (datos reales desde 06-12) | 20 | — (risk_tournament, sin period) | Mejor por ΔmaxDD: cooldown-1950min (maxDD 21.36%→4.85%, ΔmaxDD +16.51pp) e invierte el ROI a positivo (-8.93%→+1.15%) | Torneo de mecanismos anti-crash. Breaker sin efecto (Δ 0/0) — ver entrada #9 |
 | 2026-07-06 | MSFT | 2024-07-01 → 2026-07-01 | 20 | month / train-periods 1 | SE justifica (WF-pico -8.32% > Fija -11.04% > WF-meseta -11.59%; Oráculo -1.39%) | 2 años (24 meses). Todo el torneo perdió plata — rally a $562 y crash a $342, mismo patrón que SPCX. Gana pico, no meseta |
 | 2026-07-06 | NVDA | 2024-07-01 → 2026-07-01 | 20 | month / train-periods 1 | SE justifica (WF-pico +76.12% > Fija +65.37% > WF-meseta +63.54%; Oráculo +96.77%) | 2 años (24 meses). Gana pico, no meseta — contradice el patrón de TSLA |
 | 2026-07-06 | TSLA | 2023-07-01 → 2026-07-01 | 20 | month / train-periods 1 | SE justifica (WF-meseta +85.02% > WF-pico +72.15% > Fija +68.38%; Oráculo +105.24%) | 3 años (36 meses). Confirma la corrida de 24 meses; margen WF-meseta vs Fija ~17pp |

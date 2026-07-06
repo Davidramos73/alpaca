@@ -23,6 +23,7 @@ Estos tres parámetros (`BUY_DROP_PCT`, `SELL_RISE_PCT`, el intervalo de consult
 * **`backtest.py`** — Simulación histórica de la estrategia sobre datos reales descargados de Alpaca, con reporte de ROI, ganancia y operaciones.
 * **`optimize.py`** — Grid search: prueba todas las combinaciones de `buy_drop_pct` (1–10%) × `sell_rise_pct` (1–10%) × los intervalos indicados sobre un rango histórico completo, y reporta la mejor combinación por ROI.
 * **`walk_forward.py`** — Análisis por período (semana o mes, según `--period`): mide qué tan estables/predecibles son los parámetros óptimos de un período a otro (dispersión, autocorrelación, *regret*) y corre un torneo que compara parámetros fijos contra distintas variantes de auto-ajuste periódico, para decidir con datos si vale la pena adaptar el bot en vivo. Ver `docs/superpowers/specs/2026-07-04-walk-forward-design.md` (diseño original, semanal) y `docs/superpowers/specs/2026-07-05-monthly-period-design.md` (agregado de granularidad mensual) para el diseño completo, y `docs/walk-forward-log.md` para la bitácora de hallazgos.
+* **`risk_tournament.py`** — Torneo de mecanismos anti-crash: compara sobre datos históricos el grid sin frenos contra tres mecanismos que limitan compras durante desplomes (cooldown temporal, slots reservados por profundidad, circuit breaker que congela compras), con buy & hold como referencia. Reporta ROI, drawdown máximo y los deltas contra baseline por variante. Ver `docs/superpowers/specs/2026-07-06-risk-mechanisms-design.md` (diseño) y `docs/walk-forward-log.md` (resultados).
 * **`tesla.py`** — Prototipo original del bot, con la lógica y los parámetros hardcodeados para TSLA. Reemplazado por `tradebot.py`; se conserva solo como referencia histórica.
 * **`test1.py`** — Script suelto de prueba para consultar precios de Alpaca. No forma parte del flujo principal.
 * **`test_walk_forward.py`** — Suite de tests (pytest) para las funciones de `optimize.py` y `walk_forward.py`, con datos sintéticos (no requiere red ni credenciales).
@@ -30,7 +31,7 @@ Estos tres parámetros (`BUY_DROP_PCT`, `SELL_RISE_PCT`, el intervalo de consult
 * **`.env.example`** — Plantilla de variables de entorno; copiar a `.env` y completar con credenciales reales.
 * **`Dockerfile` / `docker-compose.yml`** — Empaquetan y corren `tradebot.py` en un contenedor.
 
-Archivos generados en tiempo de ejecución (ignorados por git, ver `.gitignore`): `tradebot_<symbol>.log`, `*_state.json` (estado persistente del bot), `cache_*.pkl` (caché de velas históricas), `backtest_*.log`, `optimize_*.csv`/`.log`, `walkforward_*.csv`/`.log`.
+Archivos generados en tiempo de ejecución (ignorados por git, ver `.gitignore`): `tradebot_<symbol>.log`, `*_state.json` (estado persistente del bot), `cache_*.pkl` (caché de velas históricas), `backtest_*.log`, `optimize_*.csv`/`.log`, `walkforward_*.csv`/`.log`, `risktournament_*.csv`/`.log`.
 
 ---
 
@@ -140,6 +141,14 @@ python walk_forward.py \
 
 Parte el histórico en períodos (semanas o meses, según `--period week|month`, default `week`), mide cuánto varían los parámetros óptimos de un período a otro y compara en un torneo (con un solo portfolio continuo, sin liquidar posiciones al cambiar de parámetros) cuatro estrategias: parámetros fijos por mediana histórica, auto-ajuste periódico usando el pico del grid, una variante robusta por meseta, y un oráculo teórico con lookahead. Genera `walkforward_<symbol>_<timestamp>.log` (con un veredicto explícito sobre si el auto-ajuste se justifica) y `.csv` (historial de parámetros óptimos por período).
 
+### Torneo de mecanismos anti-crash (`risk_tournament.py`)
+
+```bash
+python3 risk_tournament.py --symbol TSLA --date-start 2024-07-01 --date-end 2026-07-01
+```
+
+Corre, sobre un mismo rango histórico y con un solo portfolio por variante, el grid sin frenos (baseline) contra 8 variantes de los tres mecanismos anti-crash de `backtest.py`/`optimize.py` (`--cooldown-minutes`: bloquea nuevas compras un tiempo fijo tras la última compra; `--reserved-slots` + `--deep-drop-pct`: reserva cupos que solo se usan si la caída es más profunda que ese umbral; `--breaker-dd-pct`: circuit breaker que congela las compras cuando el drawdown supera el umbral, hasta que se recupera a la mitad), más una fila de referencia con buy & hold. Genera `risktournament_<symbol>_<timestamp>.log` (tabla de ROI/maxDD por variante y deltas contra baseline) y `.csv`. Resultados en `docs/walk-forward-log.md`, entrada #9.
+
 ### Tests
 
 ```bash
@@ -158,3 +167,7 @@ Análisis walk-forward sobre TSLA (intervalo de 20 min), repetidos con muestras 
 - **Granularidad mensual (`--period month`): el resultado se invierte.** En tres corridas (12, 24 y 36 meses), la variante robusta de auto-ajuste (que promedia el vecindario del grid en vez de perseguir el pico exacto) le gana al fijo por un margen consistente de ~15-17pp en las dos muestras más grandes. Perseguir el pico exacto mensual sigue sin aportar mucho por sí solo — el valor está en la robustez, no en la precisión puntual.
 
 Es decir, la cadencia de re-optimización parece importar tanto como si se auto-ajusta o no. Sigue siendo un solo símbolo (TSLA); falta validar en otros antes de confiar del todo en esto. Ver `docs/walk-forward-log.md` para el detalle completo de cada corrida (comandos exactos, artefactos, y las notas sobre por qué el "techo teórico" puede comportarse de forma contraintuitiva con pocas muestras).
+
+Torneo de mecanismos anti-crash (`risk_tournament.py`) sobre TSLA/NVDA/MSFT (2 años, 2024-07 → 2026-07) y SPCX (2026-01 → 2026-07):
+
+- **El cooldown temporal es, en general, el mecanismo que más recorta el drawdown máximo, y el circuit breaker no tuvo ningún efecto en ninguna de las 4 corridas.** En SPCX, `cooldown-1950min` recorta el maxDD de 21.36% a 4.85% y de paso invierte el ROI a positivo (-8.93% → +1.15%); en MSFT el mejor fue `reserva-3slots-30pct` (maxDD 27.97% → 23.34%, costo de ROI casi nulo: -0.07pp). En los símbolos sanos (TSLA/NVDA), un cooldown corto (`cooldown-390min`) protege algo sin casi costo de ROI (TSLA -0.66pp, NVDA +10.45pp), mientras que el cooldown más largo protege mucho más pero cuesta caro en TSLA (-13.29pp de ROI). El breaker (`breaker-15pct`/`25pct`) dio delta 0.00/0.00 en las 4 corridas porque el portfolio ya estaba con los 10 cupos ocupados cuando el drawdown cruzaba el umbral. Todavía no hay un candidato claro para ser default de `tradebot.py` — ver entrada #9 de `docs/walk-forward-log.md` para el detalle completo y el veredicto provisorio.
