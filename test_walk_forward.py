@@ -609,3 +609,41 @@ def test_cooldown_no_afecta_compra_inicial_ni_ventas():
     assert r["buys"] == 3
     assert r["sells"] == 2
     assert r["open_positions"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Mecanismo anti-crash: slots reservados por profundidad (spec fase 2.3)
+# ---------------------------------------------------------------------------
+
+def test_can_buy_slots_reservados():
+    # pivot=100, max_buys=3, reserved=1: el 3er slot exige caída >= 20%
+    compras = [{"price": 100.0, "qty": 1.0}, {"price": 95.0, "qty": 1.0}]
+    assert not can_buy(compras, 3, 85.0, reserved_slots=1, deep_drop_pct=0.20)  # 85 > 80
+    assert can_buy(compras, 3, 79.0, reserved_slots=1, deep_drop_pct=0.20)      # 79 <= 80
+    # con un solo lote (slot no reservado) compra normal
+    assert can_buy(compras[:1], 3, 94.0, reserved_slots=1, deep_drop_pct=0.20)
+
+
+def test_slots_reservados_frenan_sin_caida_profunda():
+    # max_buys=3, reserved=1, deep=20% (umbral: pivot 100 -> 80),
+    # drop 5%, rise 99% (sin ventas), [100, 95, 90, 85, 79]:
+    #   sin mecanismo: compra 100, 95, 90 (pila llena en 3).
+    #   con mecanismo: compra 100, 95; 90 y 85 bloqueadas (> 80); 79 compra.
+    df = make_df([100, 95, 90, 85, 79])
+    sin = simulate(df, 3, 0.05, 0.99, 0.0)
+    con = simulate(df, 3, 0.05, 0.99, 0.0, reserved_slots=1, deep_drop_pct=0.20)
+    assert [p["price"] for p in sin["state"]["purchases"]] == [100.0, 95.0, 90.0]
+    assert [p["price"] for p in con["state"]["purchases"]] == [100.0, 95.0, 79.0]
+
+
+def test_slots_reservados_pivot_se_renueva_tras_vaciar_pila():
+    # [100, 95, 105, 105.5, 100, 95, 90, 79], drop 5% rise 5%,
+    # max_buys=3, reserved=1, deep=20%:
+    #   init@100, grid@95, 105>=99.75 vende lote 95, 105.5>=105 vende lote
+    #   100 (pila vacía), re-pivot init@100, grid@95, 90 bloqueada
+    #   (nuevo pivot 100 -> umbral 80), 79 compra (slot reservado).
+    df = make_df([100, 95, 105, 105.5, 100, 95, 90, 79])
+    r = simulate(df, 3, 0.05, 0.05, 0.0, reserved_slots=1, deep_drop_pct=0.20)
+    assert r["buys"] == 5
+    assert r["sells"] == 2
+    assert [p["price"] for p in r["state"]["purchases"]] == [100.0, 95.0, 79.0]

@@ -56,7 +56,7 @@ def can_buy(purchases: list, max_buys: int, price: float, *,
             return False
     return True
 
-def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None, on_trade=None, cooldown_minutes: float = 0.0) -> dict:
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, state: dict | None = None, on_trade=None, cooldown_minutes: float = 0.0, reserved_slots: int = 0, deep_drop_pct: float = 0.0) -> dict:
     if state is None:
         state = new_state()
     cash        = state["cash"]
@@ -98,7 +98,9 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
 
             if price <= buy_target:
                 if can_buy(purchases, max_buys, price,
-                           cooldown_remaining_min=cooldown_remaining):
+                           cooldown_remaining_min=cooldown_remaining,
+                           reserved_slots=reserved_slots,
+                           deep_drop_pct=deep_drop_pct):
                     free_slots    = max_buys - len(purchases)
                     bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
                     effective_buy = buy_amount + bonus
