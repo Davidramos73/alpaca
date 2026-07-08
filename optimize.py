@@ -119,6 +119,162 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
         "open_positions": len(purchases),
     }
 
+def simulate_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, trail_pct: float = 0.0, on_trade=None, on_bar=None) -> dict:
+    """Como simulate(), pero al llegar a sell_rise_pct no vende: arma un
+    trailing stop que sigue el pico del precio (vela a vela, no solo en
+    checkpoints) y vende recién cuando el precio retrocede trail_pct desde
+    ese pico. Mientras el trailing está armado no se evalúan compras ni
+    ventas del grid. Usa precio real de ejecución en toda la contabilidad;
+    trailing_capture (por venta y total) es una métrica de reporte que
+    compara contra el sell_target que hubiera vendido la versión vanilla.
+    df debe ser el histórico de 1 minuto completo, sin resamplear."""
+    cash        = STARTING_CASH
+    purchases   = []
+    profit_pool = 0.0
+    total_buys  = total_sells = 0
+    total_fees  = 0.0
+    trailing_capture_total = 0.0
+    trailing_sells = 0
+    trailing_captures = []
+
+    trailing = None  # {"peak", "stop", "sell_target_ref"} cuando está armado
+
+    for i, row in enumerate(df.itertuples(index=False)):
+        price     = float(row.close)
+        timestamp = row.timestamp
+
+        if trailing is not None:
+            if price > trailing["peak"]:
+                trailing["peak"] = price
+                trailing["stop"] = trailing["peak"] * (1.0 - trail_pct)
+            if price <= trailing["stop"]:
+                sold      = purchases.pop()
+                revenue   = sold["qty"] * price
+                sell_fee  = revenue * fee_pct
+                cash     += revenue - sell_fee
+                total_fees += sell_fee
+                total_sells += 1
+                profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
+                if use_pool and profit > 0:
+                    profit_pool += profit
+                capture = sold["qty"] * (price - trailing["sell_target_ref"])
+                trailing_capture_total += capture
+                trailing_captures.append(capture)
+                trailing_sells += 1
+                if on_trade:
+                    on_trade({"type": "SELL", "price": price, "qty": sold["qty"], "fee": sell_fee,
+                              "cash": cash, "pool": profit_pool, "timestamp": timestamp,
+                              "open_positions": len(purchases),
+                              "buy_price": sold["price"], "profit": profit, "buy_timestamp": sold["timestamp"],
+                              "order_id": sold["order_id"], "trailing_capture": capture})
+                trailing = None
+            if on_bar:
+                on_bar(timestamp, cash + sum(p["qty"] for p in purchases) * price)
+            continue
+
+        if i % interval_minutes != 0:
+            if on_bar:
+                on_bar(timestamp, cash + sum(p["qty"] for p in purchases) * price)
+            continue
+
+        if len(purchases) == 0:
+            free_slots    = max_buys - len(purchases)
+            bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
+            effective_buy = buy_amount + bonus
+            qty     = effective_buy / price
+            buy_fee = effective_buy * fee_pct
+            cash   -= effective_buy + buy_fee
+            if use_pool:
+                profit_pool -= bonus
+            total_fees += buy_fee
+            total_buys += 1
+            order_id = total_buys
+            purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy,
+                               "timestamp": timestamp, "order_id": order_id})
+            if on_trade:
+                on_trade({"type": "BUY_INIT", "price": price, "qty": qty, "fee": buy_fee,
+                          "cash": cash, "pool": profit_pool, "timestamp": timestamp,
+                          "open_positions": len(purchases), "order_id": order_id})
+        else:
+            last_price  = purchases[-1]["price"]
+            buy_target  = last_price * (1.0 - buy_drop_pct)
+            sell_target = last_price * (1.0 + sell_rise_pct)
+
+            if price <= buy_target:
+                if len(purchases) < max_buys:
+                    free_slots    = max_buys - len(purchases)
+                    bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
+                    effective_buy = buy_amount + bonus
+                    qty     = effective_buy / price
+                    buy_fee = effective_buy * fee_pct
+                    cash   -= effective_buy + buy_fee
+                    if use_pool:
+                        profit_pool -= bonus
+                    total_fees += buy_fee
+                    total_buys += 1
+                    order_id = total_buys
+                    purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy,
+                                       "timestamp": timestamp, "order_id": order_id})
+                    if on_trade:
+                        on_trade({"type": "BUY_GRID", "price": price, "qty": qty, "fee": buy_fee,
+                                  "cash": cash, "pool": profit_pool, "timestamp": timestamp,
+                                  "open_positions": len(purchases), "order_id": order_id})
+
+            elif price >= sell_target:
+                trailing = {"peak": price, "stop": price * (1.0 - trail_pct), "sell_target_ref": sell_target}
+
+        if on_bar:
+            on_bar(timestamp, cash + sum(p["qty"] for p in purchases) * price)
+
+    # Fin de datos con trailing activo: liquidar al último close disponible.
+    if trailing is not None and purchases:
+        price     = float(df.iloc[-1]["close"])
+        timestamp = df.iloc[-1]["timestamp"]
+        sold      = purchases.pop()
+        revenue   = sold["qty"] * price
+        sell_fee  = revenue * fee_pct
+        cash     += revenue - sell_fee
+        total_fees += sell_fee
+        total_sells += 1
+        profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
+        if use_pool and profit > 0:
+            profit_pool += profit
+        capture = sold["qty"] * (price - trailing["sell_target_ref"])
+        trailing_capture_total += capture
+        trailing_captures.append(capture)
+        trailing_sells += 1
+        if on_trade:
+            on_trade({"type": "SELL", "price": price, "qty": sold["qty"], "fee": sell_fee,
+                      "cash": cash, "pool": profit_pool, "timestamp": timestamp,
+                      "open_positions": len(purchases),
+                      "buy_price": sold["price"], "profit": profit, "buy_timestamp": sold["timestamp"],
+                      "order_id": sold["order_id"], "trailing_capture": capture})
+
+    final_price    = float(df.iloc[-1]["close"])
+    holdings_value = sum(p["qty"] for p in purchases) * final_price
+    total_equity   = cash + holdings_value
+    profit         = total_equity - STARTING_CASH
+    roi            = (profit / STARTING_CASH) * 100
+
+    return {
+        "interval_minutes": interval_minutes,
+        "max_buys":       max_buys,
+        "buy_drop_pct":   buy_drop_pct,
+        "sell_rise_pct":  sell_rise_pct,
+        "fee_pct":        fee_pct,
+        "trail_pct":      trail_pct,
+        "roi":            roi,
+        "profit":         profit,
+        "total_equity":   total_equity,
+        "total_fees":     total_fees,
+        "buys":           total_buys,
+        "sells":          total_sells,
+        "open_positions": len(purchases),
+        "trailing_capture_total": trailing_capture_total,
+        "trailing_sells":         trailing_sells,
+        "trailing_captures":      trailing_captures,
+    }
+
 def daily_last(records: list[tuple]) -> list[dict]:
     """Reduce una serie (timestamp, valor) a un punto por día de calendario
     (el último valor visto ese día, que con datos intradía ordenados es el
