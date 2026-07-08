@@ -48,3 +48,25 @@ def test_returns_same_shape_as_simulate_plus_trailing_fields():
         "trailing_capture_total", "trailing_sells", "trailing_captures",
     }
     assert set(result.keys()) == expected_keys
+
+
+def test_trailing_capture_is_negative_on_immediate_pullback():
+    """Arma el trailing en 105 (rise 5% sobre compra en 100) y en la vela
+    siguiente el precio ya cayó a 103, por debajo del stop (103.95) — vende
+    ahí. La ganancia real sigue siendo positiva (103 > 100), pero el
+    trailing_capture es negativo porque vendió por debajo de los 105 que
+    hubiera vendido la versión vanilla."""
+    df = make_df([100, 105, 103])
+    trades = []
+
+    result = simulate_trailing(
+        df, max_buys=10, buy_drop_pct=0.05, sell_rise_pct=0.05, fee_pct=0.0,
+        use_pool=False, buy_amount=10000.0, interval_minutes=1, trail_pct=0.01,
+        on_trade=trades.append,
+    )
+
+    sell = trades[1]
+    assert sell["price"] == pytest.approx(103.0)
+    assert sell["profit"] == pytest.approx(300.0)
+    assert sell["trailing_capture"] == pytest.approx(-200.0)
+    assert result["trailing_capture_total"] == pytest.approx(-200.0)
