@@ -108,3 +108,33 @@ def test_restarts_with_new_buy_after_trailing_empties_the_stack():
 
     assert [t["type"] for t in trades] == ["BUY_INIT", "SELL", "BUY_INIT"]
     assert trades[2]["price"] == pytest.approx(90.0)
+
+
+def test_holds_lower_lot_untouched_and_reverts_reference_after_trailing_sell():
+    """Dos lotes abiertos (100 y 95, tope=95). El tope arma trailing al
+    llegar a 99.75 (rise 5%), sube a 105 sin vender NADA (ni el tope
+    -todavía en trailing- ni el lote de abajo), y al retroceder a 103
+    vende el tope (95) — no el de 100. Después, la referencia para la
+    siguiente decisión vuelve correctamente al lote restante (100), no al
+    precio de venta (103) ni al sell_target que armó el trailing (99.75):
+    la compra grid siguiente se dispara en 94 porque 94 <= 100*(1-0.05)=95."""
+    df = make_df([100, 95, 99.75, 105, 103, 94])
+    trades = []
+
+    result = simulate_trailing(
+        df, max_buys=10, buy_drop_pct=0.05, sell_rise_pct=0.05, fee_pct=0.0,
+        use_pool=False, buy_amount=10000.0, interval_minutes=1, trail_pct=0.01,
+        on_trade=trades.append,
+    )
+
+    assert [t["type"] for t in trades] == ["BUY_INIT", "BUY_GRID", "SELL", "BUY_GRID"]
+    assert trades[0]["price"] == pytest.approx(100.0)
+    assert trades[1]["price"] == pytest.approx(95.0)
+
+    sell = trades[2]
+    assert sell["price"] == pytest.approx(103.0)
+    assert sell["buy_price"] == pytest.approx(95.0)  # vendió el TOPE (95), no el de 100
+
+    assert trades[3]["price"] == pytest.approx(94.0)  # referencia volvió al lote de 100
+
+    assert result["open_positions"] == 2  # quedan el de 100 y el nuevo de 94
