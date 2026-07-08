@@ -7,3 +7,6 @@ data/
 optimize_*.csv
 backtest_*.log
 *_state.json
+*_equity.json
+*_equity_chart.html
+__pycache__/

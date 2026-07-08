@@ -1,6 +1,7 @@
 import os
 import argparse
 import itertools
+import json
 import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ STARTING_CASH = 100_000.0
 # ---------------------------------------------------------------------------
 # Simulación (misma lógica que backtest.py, sin I/O)
 # ---------------------------------------------------------------------------
-def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1) -> dict:
+def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, on_trade=None, on_bar=None) -> dict:
     cash        = STARTING_CASH
     purchases   = []
     profit_pool = 0.0
@@ -41,8 +42,16 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             if use_pool:
                 profit_pool -= bonus
             total_fees += buy_fee
-            purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
             total_buys += 1
+            order_id = total_buys
+            purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy,
+                               "timestamp": row["timestamp"], "order_id": order_id})
+            if on_trade:
+                on_trade({"type": "BUY_INIT", "price": price, "qty": qty, "fee": buy_fee,
+                          "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                          "open_positions": len(purchases), "order_id": order_id})
+            if on_bar:
+                on_bar(row["timestamp"], cash + sum(p["qty"] for p in purchases) * price)
             continue
 
         last_price  = purchases[-1]["price"]
@@ -60,8 +69,14 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
                 if use_pool:
                     profit_pool -= bonus
                 total_fees += buy_fee
-                purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy})
                 total_buys += 1
+                order_id = total_buys
+                purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy,
+                                   "timestamp": row["timestamp"], "order_id": order_id})
+                if on_trade:
+                    on_trade({"type": "BUY_GRID", "price": price, "qty": qty, "fee": buy_fee,
+                              "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                              "open_positions": len(purchases), "order_id": order_id})
 
         elif price >= sell_target:
             sold      = purchases.pop()
@@ -73,6 +88,15 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
             if use_pool and profit > 0:
                 profit_pool += profit
+            if on_trade:
+                on_trade({"type": "SELL", "price": price, "qty": sold["qty"], "fee": sell_fee,
+                          "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                          "open_positions": len(purchases),
+                          "buy_price": sold["price"], "profit": profit, "buy_timestamp": sold["timestamp"],
+                          "order_id": sold["order_id"]})
+
+        if on_bar:
+            on_bar(row["timestamp"], cash + sum(p["qty"] for p in purchases) * price)
 
     final_price    = float(df.iloc[-1]["close"])
     holdings_value = sum(p["qty"] for p in purchases) * final_price
@@ -95,6 +119,15 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
         "open_positions": len(purchases),
     }
 
+def daily_last(records: list[tuple]) -> list[dict]:
+    """Reduce una serie (timestamp, valor) a un punto por día de calendario
+    (el último valor visto ese día, que con datos intradía ordenados es el
+    más cercano al cierre de mercado)."""
+    daily: dict = {}
+    for ts, value in records:
+        daily[ts.date()] = value
+    return [{"date": d.isoformat(), "value": v} for d, v in sorted(daily.items())]
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -107,7 +140,12 @@ def main():
     parser.add_argument("--fee-pct",    type=float, default=0.0,          help="Fee por operación sobre el monto (default: 0.0). Ej: 0.001 = 0.1%%")
     parser.add_argument("--no-profit-pool", action="store_true",          help="Desactivar reinversión de ganancias (modo clásico)")
     parser.add_argument("--intervals",  type=str,   default="20",         help="Lista de intervalos de revisión en minutos, separados por coma (default: 20). Ej: 1,5,15,20,30,60,120")
+    parser.add_argument("--export-equity-json", action="store_true", help="Exportar la curva de equity diaria (al cierre) de cada combinación drop/rise a un JSON, para graficar después")
     args = parser.parse_args()
+
+    if args.export_equity_json and len(set(v.strip() for v in args.intervals.split(","))) > 1:
+        print("Error: --export-equity-json requiere un solo --intervals (no una lista).")
+        return
 
     load_dotenv()
     api_key    = os.getenv("ALPACA_API_KEY")
@@ -154,6 +192,7 @@ def main():
           f"(max_buys fijo = {MAX_BUYS}, buy_amount = ${buy_amount:,.0f}, fee = {fee_pct*100:.3f}%, pool = {'ON' if use_pool else 'OFF'})…\n")
 
     results = []
+    equity_series = []  # solo se llena si --export-equity-json
     done = 0
     for interval_minutes in intervals:
         df = df_1min.iloc[::interval_minutes].reset_index(drop=True)
@@ -161,7 +200,19 @@ def main():
             done += 1
             if done % 10 == 0 or done == total:
                 print(f"  {done}/{total}", end="\r")
-            results.append(simulate(df, MAX_BUYS, buy_drop, sell_rise, fee_pct, use_pool, buy_amount, interval_minutes))
+            if args.export_equity_json:
+                bars = []
+                r = simulate(df, MAX_BUYS, buy_drop, sell_rise, fee_pct, use_pool, buy_amount, interval_minutes,
+                             on_bar=lambda ts, eq: bars.append((ts, eq)))
+                equity_series.append({
+                    "drop_pct": round(buy_drop * 100),
+                    "rise_pct": round(sell_rise * 100),
+                    "interval_minutes": interval_minutes,
+                    "points": [{"date": p["date"], "equity": p["value"]} for p in daily_last(bars)],
+                })
+            else:
+                r = simulate(df, MAX_BUYS, buy_drop, sell_rise, fee_pct, use_pool, buy_amount, interval_minutes)
+            results.append(r)
 
     # --- Resultados ---
     results.sort(key=lambda r: r["roi"], reverse=True)
@@ -177,6 +228,26 @@ def main():
     precio_fin    = float(df_1min.iloc[-1]["close"])
     best          = results[0]
     worst         = results[-1]
+
+    best_trades = []
+    if args.export_equity_json:
+        best_df = df_1min.iloc[::best["interval_minutes"]].reset_index(drop=True)
+
+        def _capture_trade(ev):
+            trade = {
+                "type":     "SELL" if ev["type"] == "SELL" else "BUY",
+                "date":     ev["timestamp"].strftime("%Y-%m-%d"),
+                "price":    ev["price"],
+                "order_id": ev["order_id"],
+            }
+            if ev["type"] == "SELL":
+                trade["buy_price"] = ev["buy_price"]
+                trade["profit"]    = ev["profit"]
+                trade["buy_date"]  = ev["buy_timestamp"].strftime("%Y-%m-%d")
+            best_trades.append(trade)
+
+        simulate(best_df, MAX_BUYS, best["buy_drop_pct"], best["sell_rise_pct"], fee_pct, use_pool, buy_amount,
+                 best["interval_minutes"], on_trade=_capture_trade)
 
     best_by_interval = {}
     for r in results:
@@ -292,6 +363,24 @@ def main():
 
     print(f"\nLog guardado en  : {log_path}")
     print(f"CSV guardado en  : {csv_path}")
+
+    if args.export_equity_json:
+        price_daily = daily_last(zip(df_1min["timestamp"], df_1min["close"].astype(float)))
+        equity_json_path = f"optimize_{symbol}_{run_ts}_equity.json"
+        payload = {
+            "symbol":       symbol,
+            "date_start":   periodo_start,
+            "date_end":     periodo_end,
+            "interval_minutes": intervals[0],
+            "starting_cash": STARTING_CASH,
+            "price":        [{"date": p["date"], "close": p["value"]} for p in price_daily],
+            "series":       equity_series,
+            "best_combo":   {"drop_pct": round(best["buy_drop_pct"] * 100), "rise_pct": round(best["sell_rise_pct"] * 100)},
+            "best_trades":  best_trades,
+        }
+        with open(equity_json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+        print(f"JSON de equity   : {equity_json_path}")
 
 if __name__ == "__main__":
     main()
