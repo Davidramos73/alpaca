@@ -297,10 +297,15 @@ def main():
     parser.add_argument("--no-profit-pool", action="store_true",          help="Desactivar reinversión de ganancias (modo clásico)")
     parser.add_argument("--intervals",  type=str,   default="20",         help="Lista de intervalos de revisión en minutos, separados por coma (default: 20). Ej: 1,5,15,20,30,60,120")
     parser.add_argument("--export-equity-json", action="store_true", help="Exportar la curva de equity diaria (al cierre) de cada combinación drop/rise a un JSON, para graficar después")
+    parser.add_argument("--trail-pcts", type=str, default=None, help="Lista de % de trailing stop a comparar contra la mejor combinación, separados por coma (ej. 0.5,1,1.5,2). Requiere un solo --intervals.")
     args = parser.parse_args()
 
     if args.export_equity_json and len(set(v.strip() for v in args.intervals.split(","))) > 1:
         print("Error: --export-equity-json requiere un solo --intervals (no una lista).")
+        return
+
+    if args.trail_pcts and len(set(v.strip() for v in args.intervals.split(","))) > 1:
+        print("Error: --trail-pcts requiere un solo --intervals (no una lista).")
         return
 
     load_dotenv()
@@ -404,6 +409,16 @@ def main():
 
         simulate(best_df, MAX_BUYS, best["buy_drop_pct"], best["sell_rise_pct"], fee_pct, use_pool, buy_amount,
                  best["interval_minutes"], on_trade=_capture_trade)
+
+    trail_pcts = []
+    trailing_results = []
+    if args.trail_pcts:
+        trail_pcts = sorted({float(v.strip()) / 100 for v in args.trail_pcts.split(",") if v.strip()})
+        for trail_pct in trail_pcts:
+            trailing_results.append(
+                simulate_trailing(df_1min, MAX_BUYS, best["buy_drop_pct"], best["sell_rise_pct"], fee_pct,
+                                   use_pool, buy_amount, best["interval_minutes"], trail_pct=trail_pct)
+            )
 
     best_by_interval = {}
     for r in results:
@@ -537,6 +552,29 @@ def main():
         with open(equity_json_path, "w", encoding="utf-8") as f:
             json.dump(payload, f)
         print(f"JSON de equity   : {equity_json_path}")
+
+    if trailing_results:
+        trail_sep = "-" * 80
+        trail_lines = [
+            "",
+            f"  COMPARACIÓN TRAILING STOP (mejor combo: drop {best['buy_drop_pct']*100:.0f}% / "
+            f"rise {best['sell_rise_pct']*100:.0f}% / interval {best['interval_minutes']} min)",
+            trail_sep,
+            f"  {'ESTRATEGIA':<16}  {'ROI':>9}  {'Compras':>7}  {'Ventas':>6}  {'Trailing capture':>17}",
+            trail_sep,
+            f"  {'vanilla':<16}  {best['roi']:>+8.2f}%  {best['buys']:>7}  {best['sells']:>6}  {'—':>17}",
+        ]
+        for trail_pct, r in zip(trail_pcts, trailing_results):
+            label = f"trail {trail_pct*100:.1f}%"
+            capture_str = "$" + format(r["trailing_capture_total"], "+,.0f")
+            trail_lines.append(
+                f"  {label:<16}  {r['roi']:>+8.2f}%  {r['buys']:>7}  {r['sells']:>6}  {capture_str:>17}"
+            )
+        trail_lines.append(trail_sep)
+        trail_content = "\n".join(trail_lines)
+        print(trail_content)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(trail_content + "\n")
 
 if __name__ == "__main__":
     main()
