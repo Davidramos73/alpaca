@@ -34,3 +34,17 @@ def test_trailing_rides_and_sells_on_pullback():
     assert result["trailing_capture_total"] == pytest.approx(200.0)
     assert result["roi"] == pytest.approx(0.7)
     assert result["open_positions"] == 0
+
+
+def test_returns_same_shape_as_simulate_plus_trailing_fields():
+    df = make_df([100, 101])
+    result = simulate_trailing(
+        df, max_buys=10, buy_drop_pct=0.05, sell_rise_pct=0.05, fee_pct=0.0,
+        use_pool=True, buy_amount=10000.0, interval_minutes=1, trail_pct=0.01,
+    )
+    expected_keys = {
+        "interval_minutes", "max_buys", "buy_drop_pct", "sell_rise_pct", "fee_pct", "trail_pct",
+        "roi", "profit", "total_equity", "total_fees", "buys", "sells", "open_positions",
+        "trailing_capture_total", "trailing_sells", "trailing_captures",
+    }
+    assert set(result.keys()) == expected_keys
