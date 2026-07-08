@@ -91,3 +91,20 @@ def test_trailing_liquidates_at_last_close_if_never_triggered():
     assert result["trailing_sells"] == 1
     assert result["trailing_capture_total"] == pytest.approx(700.0)
     assert result["open_positions"] == 0
+
+
+def test_restarts_with_new_buy_after_trailing_empties_the_stack():
+    """Tras vender el único lote por el trailing, el próximo checkpoint
+    arranca un ciclo nuevo con una compra inicial — el grid no queda
+    trabado con la pila vacía."""
+    df = make_df([100, 105, 103, 90])
+    trades = []
+
+    simulate_trailing(
+        df, max_buys=10, buy_drop_pct=0.05, sell_rise_pct=0.05, fee_pct=0.0,
+        use_pool=False, buy_amount=10000.0, interval_minutes=1, trail_pct=0.01,
+        on_trade=trades.append,
+    )
+
+    assert [t["type"] for t in trades] == ["BUY_INIT", "SELL", "BUY_INIT"]
+    assert trades[2]["price"] == pytest.approx(90.0)
