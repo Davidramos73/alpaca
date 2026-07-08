@@ -70,3 +70,24 @@ def test_trailing_capture_is_negative_on_immediate_pullback():
     assert sell["profit"] == pytest.approx(300.0)
     assert sell["trailing_capture"] == pytest.approx(-200.0)
     assert result["trailing_capture_total"] == pytest.approx(-200.0)
+
+
+def test_trailing_liquidates_at_last_close_if_never_triggered():
+    """El precio sube monótono hasta el final de los datos sin retroceder
+    lo suficiente para disparar el stop — se liquida al último close
+    disponible en vez de quedar con una posición fantasma."""
+    df = make_df([100, 105, 108, 112])
+    trades = []
+
+    result = simulate_trailing(
+        df, max_buys=10, buy_drop_pct=0.05, sell_rise_pct=0.05, fee_pct=0.0,
+        use_pool=False, buy_amount=10000.0, interval_minutes=1, trail_pct=0.01,
+        on_trade=trades.append,
+    )
+
+    assert [t["type"] for t in trades] == ["BUY_INIT", "SELL"]
+    sell = trades[1]
+    assert sell["price"] == pytest.approx(112.0)
+    assert result["trailing_sells"] == 1
+    assert result["trailing_capture_total"] == pytest.approx(700.0)
+    assert result["open_positions"] == 0
