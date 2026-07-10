@@ -8,6 +8,7 @@ COPY requirements.txt .
 RUN uv pip install --system --no-cache -r requirements.txt
 
 COPY tradebot.py .
+COPY strategies/vanilla/tradebot.py strategies/vanilla/tradebot.py
 
 RUN mkdir /data
 ENV DATA_DIR=/data
