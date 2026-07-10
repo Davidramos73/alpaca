@@ -1,12 +1,13 @@
 .env
 .agent
 .venv
-data/
+/data/
 *.pkl
 *.log
 optimize_*.csv
 backtest_*.log
 *_state.json
 *_equity.json
+*_equity.html
 *_equity_chart.html
 __pycache__/

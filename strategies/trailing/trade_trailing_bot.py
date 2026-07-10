@@ -1,0 +1,499 @@
+import os
+import json
+import time
+import math
+import argparse
+import logging
+from datetime import datetime
+from dotenv import load_dotenv
+
+from alpaca.common.exceptions import APIError
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus, QueryOrderStatus
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockLatestTradeRequest
+
+
+def setup_logging(symbol: str):
+    log_file = f"trade_trailing_bot_{symbol}.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(log_file, encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
+    return log_file
+
+
+def load_state(state_file: str) -> dict:
+    if os.path.exists(state_file):
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                state = json.load(f)
+                if "purchases" not in state:
+                    state["purchases"] = []
+                if "profit_pool" not in state:
+                    state["profit_pool"] = 0.0
+                if "trailing" not in state:
+                    state["trailing"] = None
+                return state
+        except Exception:
+            logging.exception(f"Error al leer {state_file}. Se iniciará estado vacío.")
+    return {"purchases": [], "profit_pool": 0.0, "trailing": None}
+
+
+def save_state(state: dict, state_file: str):
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=4, ensure_ascii=False)
+    except Exception:
+        logging.exception(f"Error al guardar estado en {state_file}")
+
+
+def reconcile_with_broker(
+    trading_client, symbol: str, local_state: dict, buy_amount: float, max_buys: int
+) -> dict | None:
+    """Verifica el estado local contra Alpaca. Si hay órdenes abiertas sin
+    resolver, no continúa (es ambiguo qué acción tomar). Si la posición real
+    no coincide con el estado local, reconstruye purchases directamente desde
+    `avg_entry_price`/`qty` de la posición actual en Alpaca -- sin depender del
+    historial de órdenes, que puede estar contaminado por otros bots/scripts
+    que operen el mismo símbolo en la misma cuenta.
+
+    La reconstrucción no intenta recuperar el precio exacto de cada compra
+    individual (imposible sin ese historial): reparte la posición en lotes de
+    tamaño ~buy_amount, todos al precio promedio, y resetea profit_pool a 0.
+    Esto conserva lo importante: que una venta pendiente se ejecute si el
+    precio ya cumple la condición, y que no se abran más compras de las que
+    permite max_buys dado el capital ya invertido."""
+    try:
+        open_orders = trading_client.get_orders(
+            filter=GetOrdersRequest(symbols=[symbol], status=QueryOrderStatus.OPEN)
+        )
+    except Exception:
+        logging.exception(f"No se pudo verificar órdenes abiertas de {symbol}")
+        return None
+
+    if open_orders:
+        ids = ", ".join(str(o.id) for o in open_orders)
+        logging.critical(
+            f"Hay {len(open_orders)} orden(es) abierta(s) sin resolver para "
+            f"{symbol} (IDs: {ids}). El bot NO se iniciará para evitar duplicar "
+            "órdenes. Resuélvelas manualmente en Alpaca antes de reintentar."
+        )
+        return None
+
+    try:
+        position = trading_client.get_open_position(symbol)
+        broker_qty = abs(float(position.qty))
+        avg_price = float(position.avg_entry_price)
+    except APIError:
+        broker_qty = 0.0
+        avg_price = 0.0
+
+    local_purchases = local_state.get("purchases", [])
+    local_qty = sum(p["qty"] for p in local_purchases)
+
+    if abs(local_qty - broker_qty) <= 1e-4:
+        return local_state
+
+    logging.warning(
+        f"DISCREPANCIA de posición para {symbol}: estado local {local_qty:.6f} "
+        f"acciones vs Alpaca {broker_qty:.6f} (precio promedio ${avg_price:.2f}). "
+        "Reconstruyendo estado desde la posición real (se resetea profit_pool)."
+    )
+
+    if broker_qty <= 0:
+        purchases: list = []
+    else:
+        position_value = broker_qty * avg_price
+        estimated_lots = max(1, round(position_value / buy_amount))
+        estimated_lots = min(estimated_lots, max_buys)
+        lot_qty = broker_qty / estimated_lots
+        now_iso = datetime.utcnow().isoformat()
+        purchases = [
+            {"price": avg_price, "qty": lot_qty, "order_id": "reconciled", "timestamp": now_iso}
+            for _ in range(estimated_lots)
+        ]
+
+    logging.warning(
+        f"Estado reconstruido desde Alpaca: {len(purchases)} lote(s) estimados "
+        f"a ${avg_price:.2f} c/u, profit_pool=$0.00. Reemplazando estado local "
+        f"previo ({len(local_purchases)} lote(s))."
+    )
+    for i, p in enumerate(purchases):
+        logging.info(f"  [{i+1}] ${p['price']:.2f} | {p['qty']:.6f} acc | {p['timestamp']}")
+
+    return {"purchases": purchases, "profit_pool": 0.0}
+
+
+def floor2(x: float) -> float:
+    """Trunca a 2 decimales sin redondear hacia arriba, para nunca pedir
+    más notional del disponible (Alpaca exige máximo 2 decimales)."""
+    return math.floor(x * 100 + 1e-6) / 100
+
+
+def load_trailing_state(state: dict) -> dict | None:
+    trailing = state.get("trailing")
+    if not trailing:
+        return None
+    if not isinstance(trailing, dict):
+        return None
+    required = {"peak", "stop", "sell_target_ref", "armed_at"}
+    if not required.issubset(trailing):
+        return None
+    return trailing
+
+
+def save_trailing_state(state: dict, trailing: dict | None):
+    state["trailing"] = trailing
+
+
+def get_latest_price(data_client, symbol: str):
+    try:
+        req = StockLatestTradeRequest(symbol_or_symbols=symbol)
+        latest_trade = data_client.get_stock_latest_trade(req)
+        return float(latest_trade[symbol].price)
+    except Exception:
+        logging.exception(f"Error al obtener precio de {symbol}")
+        return None
+
+
+def wait_for_order_fill(trading_client, order_id, max_attempts=15, delay=1):
+    for attempt in range(max_attempts):
+        try:
+            order = trading_client.get_order_by_id(order_id)
+            if order.status == OrderStatus.FILLED:
+                return order
+            if order.status in [OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED]:
+                raise Exception(f"La orden fue {order.status.value}")
+        except Exception as e:
+            if "La orden fue" in str(e):
+                raise
+            logging.warning(f"Intento {attempt + 1}: Error al consultar orden {order_id}: {e}")
+        time.sleep(delay)
+    raise TimeoutError(f"La orden {order_id} no se completó en el tiempo esperado.")
+
+
+def execute_buy(trading_client, symbol: str, amount: float) -> dict | None:
+    try:
+        account = trading_client.get_account()
+        available_cash = float(account.cash)
+        if available_cash < amount:
+            logging.error(f"Capital insuficiente. Disponible: ${available_cash:,.2f} | Requerido: ${amount:,.2f}")
+            return None
+        logging.info(f"Capital disponible: ${available_cash:,.2f}")
+    except Exception:
+        logging.exception("No se pudo verificar el capital antes de la compra")
+        return None
+
+    logging.info(f"Enviando orden de COMPRA para {symbol} por ${amount:.2f} USD...")
+    try:
+        req = MarketOrderRequest(
+            symbol=symbol,
+            notional=amount,
+            side=OrderSide.BUY,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = trading_client.submit_order(req)
+        logging.info(f"Orden enviada. ID: {order.id}. Esperando ejecución...")
+
+        filled = wait_for_order_fill(trading_client, order.id)
+        filled_price = float(filled.filled_avg_price)
+        filled_qty   = float(filled.filled_qty)
+        filled_at    = filled.filled_at.isoformat() if filled.filled_at else datetime.utcnow().isoformat()
+
+        logging.info(f"¡COMPRA COMPLETADA! Precio: ${filled_price:.2f} | Acciones: {filled_qty:.6f}")
+        return {"price": filled_price, "qty": filled_qty, "order_id": str(filled.id), "timestamp": filled_at}
+
+    except TimeoutError:
+        logging.error("Timeout esperando confirmación de compra. Revisar manualmente en Alpaca.")
+        return None
+    except Exception:
+        logging.exception(f"Error al ejecutar compra de {symbol}")
+        return None
+
+
+def resync_state_after_failure(
+    trading_client, symbol: str, state: dict, buy_amount: float, max_buys: int, state_file: str
+) -> dict:
+    """Se llama tras una compra/venta que no devolvió confirmación (timeout u
+    otro error). La orden puede haberse ejecutado igual en Alpaca aunque el
+    bot no lo haya confirmado a tiempo; sin este resync, el estado local
+    queda desincronizado del real y el bot reintenta acciones inválidas
+    (p. ej. vender acciones que ya no tiene) en cada ciclo siguiente."""
+    reconciled = reconcile_with_broker(trading_client, symbol, state, buy_amount, max_buys)
+    if reconciled is None:
+        logging.warning(
+            "No se pudo reconciliar el estado tras el fallo. Se reintentará en el próximo ciclo."
+        )
+        return state
+    if reconciled is not state:
+        save_state(reconciled, state_file)
+    return reconciled
+
+
+def execute_sell(trading_client, symbol: str, qty: float) -> dict | None:
+    logging.info(f"Enviando orden de VENTA para {symbol} de {qty:.6f} acciones...")
+    try:
+        req = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+        )
+        order = trading_client.submit_order(req)
+        logging.info(f"Orden enviada. ID: {order.id}. Esperando ejecución...")
+
+        filled = wait_for_order_fill(trading_client, order.id)
+        filled_price = float(filled.filled_avg_price)
+        filled_qty   = float(filled.filled_qty)
+        filled_at    = filled.filled_at.isoformat() if filled.filled_at else datetime.utcnow().isoformat()
+
+        logging.info(f"¡VENTA COMPLETADA! Precio: ${filled_price:.2f} | Acciones: {filled_qty:.6f}")
+        return {"price": filled_price, "qty": filled_qty, "order_id": str(filled.id), "timestamp": filled_at}
+
+    except TimeoutError:
+        logging.error("Timeout esperando confirmación de venta. Revisar manualmente en Alpaca.")
+        return None
+    except Exception:
+        logging.exception(f"Error al ejecutar venta de {symbol}")
+        return None
+
+
+def update_trailing_state(trailing: dict, price: float, trail_pct: float) -> dict:
+    if price > trailing["peak"]:
+        trailing["peak"] = price
+        trailing["stop"] = trailing["peak"] * (1.0 - trail_pct)
+    return trailing
+
+
+def main():
+    load_dotenv()
+
+    # Parámetros: env var tiene prioridad, CLI es fallback
+    parser = argparse.ArgumentParser(description="Bot de Grid Trading genérico")
+    parser.add_argument("--symbol",        type=str,   default=None)
+    parser.add_argument("--buy-amount",    type=float, default=None)
+    parser.add_argument("--max-buys",      type=int,   default=None)
+    parser.add_argument("--buy-drop-pct",  type=float, default=None)
+    parser.add_argument("--sell-rise-pct", type=float, default=None)
+    parser.add_argument("--trail-pct",     type=float, default=None)
+    parser.add_argument("--interval",      type=int,   default=None)
+    parser.add_argument("--paper",         action="store_true", default=None)
+    args = parser.parse_args()
+
+    def get(arg_val, env_key, cast, default):
+        if arg_val is not None:
+            return arg_val
+        env_val = os.getenv(env_key)
+        if env_val is not None:
+            return cast(env_val)
+        return default
+
+    symbol        = (args.symbol or os.getenv("SYMBOL", "")).upper()
+    buy_amount    = get(args.buy_amount,    "BUY_AMOUNT",    float, 1000.0)
+    max_buys      = get(args.max_buys,      "MAX_BUYS",      int,   10)
+    buy_drop_pct  = get(args.buy_drop_pct,  "BUY_DROP_PCT",  float, 0.03)
+    sell_rise_pct = get(args.sell_rise_pct, "SELL_RISE_PCT", float, 0.03)
+    trail_pct     = get(args.trail_pct,     "TRAIL_PCT",     float, 0.01)
+    interval      = get(args.interval,      "INTERVAL",      int,   1200)
+    paper_env     = os.getenv("PAPER", "true").lower() != "false"
+    paper         = args.paper if args.paper else paper_env
+
+    if not symbol:
+        print("Error: debes indicar el símbolo via --symbol o la variable de entorno SYMBOL")
+        return
+    setup_logging(symbol)
+
+    api_key    = os.getenv("ALPACA_API_KEY")
+    secret_key = os.getenv("ALPACA_SECRET_KEY")
+    if not api_key or not secret_key:
+        logging.error("Credenciales de Alpaca faltantes en .env. Finalizando.")
+        return
+
+    logging.info(f"=== Iniciando Trailing Grid Bot: {symbol} ===")
+    logging.info(f"  buy_amount    : ${buy_amount:,.2f}")
+    logging.info(f"  max_buys      : {max_buys}")
+    logging.info(f"  buy_drop_pct  : {buy_drop_pct*100:.1f}%")
+    logging.info(f"  sell_rise_pct : {sell_rise_pct*100:.1f}%")
+    logging.info(f"  trail_pct     : {trail_pct*100:.1f}%")
+    logging.info(f"  intervalo     : {interval}s")
+    logging.info(f"  modo          : {'PAPER' if paper else 'REAL'}")
+
+    trading_client = TradingClient(api_key, secret_key, paper=paper)
+    data_client    = StockHistoricalDataClient(api_key, secret_key)
+
+    try:
+        account = trading_client.get_account()
+        logging.info(f"Conexión exitosa. Cuenta: #{account.account_number}")
+        logging.info(f"Efectivo: ${float(account.cash):,.2f} | Portafolio: ${float(account.portfolio_value):,.2f}")
+    except Exception:
+        logging.exception("Error al conectar con Alpaca")
+        return
+
+    data_dir   = os.getenv("DATA_DIR", ".")
+    os.makedirs(data_dir, exist_ok=True)
+    state_file = os.path.join(data_dir, f"trade_trailing_bot_{symbol}_state.json")
+    state      = load_state(state_file)
+    purchases  = state["purchases"]
+    trailing   = load_trailing_state(state)
+
+    logging.info(f"Estado cargado. Compras activas: {len(purchases)}")
+    for i, p in enumerate(purchases):
+        logging.info(f"  [{i+1}] ${p['price']:.2f} | {p['qty']:.6f} acc | {p['timestamp']}")
+
+    if trailing:
+        logging.info(
+            f"Trailing activo cargado: peak=${trailing['peak']:.2f} stop=${trailing['stop']:.2f} "
+            f"sell_ref=${trailing['sell_target_ref']:.2f}"
+        )
+
+    reconciled = reconcile_with_broker(trading_client, symbol, state, buy_amount, max_buys)
+    if reconciled is None:
+        logging.error("Verificación/reconciliación con Alpaca falló. Deteniendo el bot.")
+        return
+    if reconciled is not state:
+        state = reconciled
+        save_state(state, state_file)
+    purchases = state["purchases"]
+    trailing  = load_trailing_state(state)
+    logging.info("Estado verificado/reconciliado contra Alpaca.")
+
+    while True:
+        try:
+            clock = trading_client.get_clock()
+            if not clock.is_open:
+                next_open = clock.next_open.strftime("%Y-%m-%d %H:%M:%S %Z")
+                logging.info(f"Mercado cerrado. Próxima apertura: {next_open}.")
+                time.sleep(interval)
+                continue
+
+            state     = load_state(state_file)
+            purchases = state["purchases"]
+            trailing  = load_trailing_state(state)
+
+            current_price = get_latest_price(data_client, symbol)
+            if current_price is None:
+                logging.warning("No se pudo obtener el precio. Reintentando en el próximo ciclo...")
+                time.sleep(interval)
+                continue
+
+            logging.info(f"Precio actual de {symbol}: ${current_price:.2f}")
+
+            if len(purchases) == 0:
+                logging.info("Sin compras registradas. Ejecutando compra inicial...")
+                free_slots = max_buys - len(purchases)
+                pool = state.get("profit_pool", 0.0)
+                bonus = floor2(pool / free_slots) if free_slots > 0 else 0.0
+                effective_buy = floor2(buy_amount + bonus)
+                if bonus > 0:
+                    logging.info(f"Pool de ganancias: ${pool:.2f} | Bonus esta compra: ${bonus:.2f} | Total: ${effective_buy:.2f}")
+                buy_info = execute_buy(trading_client, symbol, effective_buy)
+                if buy_info:
+                    state["profit_pool"] = pool - bonus
+                    purchases.append(buy_info)
+                    save_state(state, state_file)
+                    logging.info(f"Grid iniciado. Compra a ${buy_info['price']:.2f}. Pool restante: ${state['profit_pool']:.2f}")
+                else:
+                    logging.error("Compra inicial FALLÓ. El grid no pudo iniciarse. Ver errores anteriores.")
+                    state = resync_state_after_failure(trading_client, symbol, state, buy_amount, max_buys, state_file)
+                time.sleep(interval)
+                continue
+
+            last_purchase  = purchases[-1]
+            last_buy_price = last_purchase["price"]
+            buy_target     = last_buy_price * (1.0 - buy_drop_pct)
+            sell_target    = last_buy_price * (1.0 + sell_rise_pct)
+
+            logging.info(f"-> Última compra: ${last_buy_price:.2f} | Activas: {len(purchases)}/{max_buys} | Pool: ${state.get('profit_pool', 0.0):.2f}")
+            logging.info(f"-> Objetivo COMPRA: ${buy_target:.2f} | Objetivo ARMAR TRAILING: ${sell_target:.2f}")
+
+            if trailing is not None:
+                trailing = update_trailing_state(trailing, current_price, trail_pct)
+                logging.info(
+                    f"-> Trailing activo: peak=${trailing['peak']:.2f} stop=${trailing['stop']:.2f}"
+                )
+                if current_price <= trailing["stop"]:
+                    logging.info(
+                        f"¡Condición de TRAILING SELL! ${current_price:.2f} <= stop ${trailing['stop']:.2f}"
+                    )
+                    sell_info = execute_sell(trading_client, symbol, last_purchase["qty"])
+                    if sell_info:
+                        removed = purchases.pop()
+                        cost_basis = removed["price"] * sell_info["qty"]
+                        proceeds   = sell_info["price"] * sell_info["qty"]
+                        profit     = proceeds - cost_basis
+                        if profit > 0:
+                            state["profit_pool"] = state.get("profit_pool", 0.0) + profit
+                            logging.info(
+                                f"Ganancia de ${profit:.2f} sumada al pool. Pool total: ${state['profit_pool']:.2f}"
+                            )
+                        else:
+                            logging.info(
+                                f"Venta sin ganancia neta (${profit:.2f}). Pool sin cambios: ${state.get('profit_pool', 0.0):.2f}"
+                            )
+                        save_trailing_state(state, None)
+                        save_state(state, state_file)
+                        logging.info(f"Venta trailing del lote a ${removed['price']:.2f} completada.")
+                        if purchases:
+                            logging.info(f"Referencia regresa a: ${purchases[-1]['price']:.2f}")
+                        else:
+                            logging.info("Todos los lotes vendidos. Grid se reiniciará en el próximo ciclo.")
+                    else:
+                        logging.error("Venta trailing FALLÓ. Ver errores anteriores.")
+                        state = resync_state_after_failure(trading_client, symbol, state, buy_amount, max_buys, state_file)
+                else:
+                    save_trailing_state(state, trailing)
+                    save_state(state, state_file)
+            elif current_price <= buy_target:
+                if len(purchases) < max_buys:
+                    logging.info(f"¡Condición de COMPRA! ${current_price:.2f} <= ${buy_target:.2f}")
+                    free_slots = max_buys - len(purchases)
+                    pool = state.get("profit_pool", 0.0)
+                    bonus = floor2(pool / free_slots) if free_slots > 0 else 0.0
+                    effective_buy = floor2(buy_amount + bonus)
+                    if bonus > 0:
+                        logging.info(f"Pool de ganancias: ${pool:.2f} | Bonus esta compra: ${bonus:.2f} | Total: ${effective_buy:.2f}")
+                    buy_info = execute_buy(trading_client, symbol, effective_buy)
+                    if buy_info:
+                        state["profit_pool"] = pool - bonus
+                        purchases.append(buy_info)
+                        save_state(state, state_file)
+                        logging.info(f"Compra registrada a ${buy_info['price']:.2f}. Activas: {len(purchases)}. Pool restante: ${state['profit_pool']:.2f}")
+                    else:
+                        logging.error("Compra grid FALLÓ. Ver errores anteriores.")
+                        state = resync_state_after_failure(trading_client, symbol, state, buy_amount, max_buys, state_file)
+                else:
+                    logging.warning(f"Precio cayó a ${current_price:.2f} pero hay {max_buys} compras activas. Sin acción.")
+
+            elif current_price >= sell_target:
+                logging.info(
+                    f"¡Condición de TRAILING ARM! ${current_price:.2f} >= ${sell_target:.2f}"
+                )
+                trailing = {
+                    "peak": current_price,
+                    "stop": current_price * (1.0 - trail_pct),
+                    "sell_target_ref": sell_target,
+                    "armed_at": datetime.utcnow().isoformat(),
+                }
+                save_trailing_state(state, trailing)
+                save_state(state, state_file)
+                logging.info(
+                    f"Trailing armado. Peak=${trailing['peak']:.2f} Stop=${trailing['stop']:.2f}"
+                )
+
+            else:
+                logging.info("Precio dentro del rango. Sin acciones.")
+
+        except Exception:
+            logging.exception("Error inesperado en el bucle principal")
+
+        time.sleep(interval)
+
+
+if __name__ == "__main__":
+    main()

@@ -20,12 +20,14 @@ El bot opera bajo las siguientes reglas definidas:
 
 ## 📁 Estructura de Archivos
 
-* **[tesla.py](file:///c:/Users/Carlos%20Alcal%C3%A1/Documents/antigravity/ALPACA/tesla.py)**: Script principal en Python con el bucle de ejecución y llamadas a Alpaca.
-* **[backtest.py](file:///c:/Users/Carlos%20Alcal%C3%A1/Documents/antigravity/ALPACA/backtest.py)**: Script de simulación histórica que evalúa la estrategia sobre datos reales del mercado (1 de Enero de 2026 - 22 de Junio de 2026).
-* **[tesla_state.json](file:///c:/Users/Carlos%20Alcal%C3%A1/Documents/antigravity/ALPACA/tesla_state.json)**: Archivo JSON local que almacena la pila de compras activa para asegurar persistencia si el script se interrumpe.
-* **[tesla_bot.log](file:///c:/Users/Carlos%20Alcal%C3%A1/Documents/antigravity/ALPACA/tesla_bot.log)**: Registro histórico detallado de todas las lecturas de precio, ejecuciones de órdenes y estado de cuenta.
-* **[.env](file:///c:/Users/Carlos%20Alcal%C3%A1/Documents/antigravity/ALPACA/.env)**: Archivo de configuración local para las claves de API privadas de Alpaca.
-* **[requirements.txt](file:///c:/Users/Carlos%20Alcal%C3%A1/Documents/antigravity/ALPACA/requirements.txt)**: Lista de dependencias del proyecto.
+La organización actual separa cada estrategia en su propia carpeta:
+
+* `tradebot.py`: shim en la raíz (`from strategies.vanilla.tradebot import *`) para poder seguir corriendo `python tradebot.py` como antes; el código real vive en `strategies/vanilla/tradebot.py`, junto a `backtest.py` (que prueba la misma lógica de grid contra histórico).
+* `strategies/vanilla/`: `tradebot.py` (bot de producción), `backtest.py` y `optimize.py` para la estrategia base, más `viewer/` — app React (Vite) que reemplaza al viejo `plot_equity.py`/`run_and_plot.sh`: lee los JSON de `viewer/public/data/<símbolo>/` generados por `optimize.py --export-equity-json` y permite además lanzar nuevas corridas desde un form en la UI (`npm run dev` dentro de `viewer/`).
+* `strategies/trailing/`: `plot_trailing.py` y `run_trail.sh` para la estrategia trailing.
+* `tesla_state.json`: estado local del bot de producción.
+* `.env`: credenciales locales de Alpaca.
+* `requirements.txt`: dependencias del proyecto.
 
 ---
 

@@ -1,0 +1,127 @@
+:root {
+  --rise-1: #86b6ef; --rise-2: #6da7ec; --rise-3: #5598e7; --rise-4: #3987e5; --rise-5: #2a78d6;
+  --rise-6: #256abf; --rise-7: #1c5cab; --rise-8: #184f95; --rise-9: #104281; --rise-10: #0d366b;
+  --cat-1: #2a78d6; --cat-2: #1baf7a; --cat-3: #eda100; --cat-4: #008300; --cat-5: #4a3aa7;
+
+  --surface-1: #fcfcfb; --page-plane: #f9f9f7; --text-primary: #0b0b0b;
+  --text-secondary: #52514e; --muted: #898781; --gridline: #e1e0d9; --baseline: #c3c2b7;
+  --price-line: #2a78d6; --marker-buy: #008300; --marker-sell: #e34948;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rise-1: #9ec5f4; --rise-2: #86b6ef; --rise-3: #6da7ec; --rise-4: #5598e7; --rise-5: #3987e5;
+    --rise-6: #2a78d6; --rise-7: #256abf; --rise-8: #1c5cab; --rise-9: #184f95; --rise-10: #104281;
+    --cat-1: #3987e5; --cat-2: #199e70; --cat-3: #c98500; --cat-4: #008300; --cat-5: #9085e9;
+
+    --surface-1: #1a1a19; --page-plane: #0d0d0d; --text-primary: #ffffff;
+    --text-secondary: #c3c2b7; --muted: #898781; --gridline: #2c2c2a; --baseline: #383835;
+    --price-line: #3987e5; --marker-buy: #008300; --marker-sell: #e66767;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--page-plane);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.app { padding: 24px; max-width: 1000px; margin: 0 auto; }
+
+.app-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+
+h1 { font-size: 20px; margin: 0; }
+
+select {
+  background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--gridline);
+  border-radius: 6px; padding: 6px 10px; font-size: 13px; max-width: 100%;
+}
+
+.run-picker { display: flex; align-items: center; gap: 8px; }
+
+.delete-run-btn {
+  background: var(--surface-1); color: var(--marker-sell); border: 1px solid var(--gridline);
+  border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer;
+}
+.delete-run-btn:hover:not(:disabled) { background: var(--gridline); }
+.delete-run-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 12px; }
+
+.panel {
+  background: var(--surface-1); border-radius: 10px; padding: 16px; margin-bottom: 20px;
+  overflow-x: auto;
+}
+.panel.error { color: var(--marker-sell); font-size: 14px; }
+.panel h2 { font-size: 14px; margin: 0 0 10px; color: var(--text-secondary); font-weight: 600; }
+
+svg { width: 100%; height: auto; display: block; overflow: visible; user-select: none; }
+
+.grid { stroke: var(--gridline); stroke-width: 1; }
+.tick { fill: var(--muted); font-size: 9px; }
+.price-line { fill: none; stroke: var(--price-line); stroke-width: 2; }
+.t5-line { fill: none; stroke-width: 2; transition: opacity 0.15s, stroke-width 0.15s; }
+.t5-line.ref-line { stroke: var(--muted); stroke-width: 2; stroke-dasharray: 5 4; }
+.t5-line.dimmed { opacity: 0.15; }
+.t5-line.emphasized { stroke-width: 3; }
+.crosshair { stroke: var(--baseline); stroke-width: 1; pointer-events: none; }
+.hitrect { cursor: crosshair; }
+.zoom-selection { fill: var(--price-line); opacity: 0.15; pointer-events: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; font-size: 12px; color: var(--text-secondary); }
+.legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.legend-clickable { cursor: pointer; padding: 2px 6px; border-radius: 4px; user-select: none; }
+.legend-clickable:hover { background: var(--gridline); }
+.legend-clickable.active { background: var(--gridline); color: var(--text-primary); font-weight: 600; }
+.swatch { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+.swatch-dashed { background: none !important; border-top: 2px dashed var(--muted); height: 0; }
+.marker-swatch { width: 0; height: 0; display: inline-block; border-left: 6px solid transparent; border-right: 6px solid transparent; }
+.marker-swatch.buy { border-bottom: 9px solid var(--marker-buy); }
+.marker-swatch.sell { border-top: 9px solid var(--marker-sell); }
+
+.trade-marker { cursor: pointer; }
+.trade-marker polygon { transition: transform 0.1s, stroke 0.1s, stroke-width 0.1s; transform-origin: center; transform-box: fill-box; }
+.trade-marker:hover polygon { transform: scale(1.4); }
+.trade-marker.linked polygon { stroke: var(--price-line); stroke-width: 3px; }
+
+.tooltip {
+  position: fixed; background: var(--surface-1); border: 1px solid var(--gridline);
+  border-radius: 6px; padding: 8px 10px; font-size: 11px; pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15); z-index: 10; max-width: 260px;
+}
+.tooltip .date { font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+.tooltip-row { display: flex; justify-content: space-between; gap: 10px; }
+.tooltip-row .val { font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.tooltip-row .roi { font-weight: 400; color: var(--text-secondary); }
+.tooltip-row .key { color: var(--text-secondary); }
+.key-line { display: inline-block; width: 10px; height: 2px; margin-right: 4px; vertical-align: middle; }
+
+table { border-collapse: collapse; font-size: 12px; width: 100%; }
+table th, table td {
+  border: 1px solid var(--gridline); padding: 5px 8px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+table th { color: var(--text-secondary); font-weight: 600; }
+table th:first-child, table td:first-child { text-align: left; }
+
+.run-form-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 12px;
+}
+.run-form label {
+  display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary);
+}
+.run-form input {
+  background: var(--page-plane); color: var(--text-primary); border: 1px solid var(--gridline);
+  border-radius: 6px; padding: 6px 8px; font-size: 13px;
+}
+.run-form button {
+  background: var(--price-line); color: #fff; border: none; border-radius: 6px;
+  padding: 8px 16px; font-size: 13px; cursor: pointer;
+}
+.run-form button:disabled { opacity: 0.6; cursor: not-allowed; }
+.run-status { margin-left: 10px; font-size: 12px; color: var(--text-secondary); }
+.run-error { margin-top: 10px; color: var(--marker-sell); font-size: 13px; }
