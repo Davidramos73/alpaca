@@ -1,4 +1,5 @@
 import os
+import re
 import argparse
 import itertools
 import json
@@ -283,6 +284,56 @@ def daily_last(records: list[tuple]) -> list[dict]:
     for ts, value in records:
         daily[ts.date()] = value
     return [{"date": d.isoformat(), "value": v} for d, v in sorted(daily.items())]
+
+BASE_EQUITY_RE = re.compile(r"^optimize_(?P<symbol>[^_]+)_(?P<run_ts>\d{8}_\d{6})_equity\.json$")
+TRAIL_EQUITY_RE = re.compile(r"^optimize_(?P<symbol>[^_]+)_(?P<run_ts>\d{8}_\d{6})_trail_(?P<trail_pct>\d+(?:\.\d+)?)_equity\.json$")
+
+def regenerate_manifest(out_dir: str) -> str:
+    """Escanea out_dir (incluyendo subcarpetas por símbolo, ej. out_dir/TSLA/)
+    agrupando cada corrida (símbolo + run_ts) con su JSON base (grid vanilla,
+    usado como referencia) y sus JSON de trailing asociados, y regenera
+    manifest.json para que el visor React sepa qué corridas puede listar en
+    el dropdown. Un run sin JSON base (por ejemplo si quedó a medias) no se
+    incluye."""
+    runs: dict = {}
+
+    for root, _dirs, files in os.walk(out_dir):
+        for name in files:
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, out_dir).replace(os.sep, "/")
+
+            m_trail = TRAIL_EQUITY_RE.match(name)
+            if m_trail:
+                key = (m_trail.group("symbol"), m_trail.group("run_ts"))
+                run = runs.setdefault(key, {"trail_files": []})
+                run["trail_files"].append({"trail_pct": float(m_trail.group("trail_pct")), "file": rel})
+                continue
+
+            m_base = BASE_EQUITY_RE.match(name)
+            if not m_base:
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            key = (m_base.group("symbol"), m_base.group("run_ts"))
+            run = runs.setdefault(key, {"trail_files": []})
+            run["symbol"]     = payload.get("symbol", m_base.group("symbol"))
+            run["run_ts"]     = m_base.group("run_ts")
+            run["date_start"] = payload.get("date_start")
+            run["date_end"]   = payload.get("date_end")
+            run["base_file"]  = rel
+
+    entries = [run for run in runs.values() if "base_file" in run]
+    for run in entries:
+        run["trail_files"].sort(key=lambda t: t["trail_pct"])
+    entries.sort(key=lambda run: run["run_ts"], reverse=True)
+
+    manifest_path = os.path.join(out_dir, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2)
+    return manifest_path
 
 # ---------------------------------------------------------------------------
 # Main
