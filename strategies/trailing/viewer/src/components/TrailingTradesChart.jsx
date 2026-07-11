@@ -75,10 +75,11 @@ export default function TrailingTradesChart({ id, title, price, trades, showTool
     e.stopPropagation();
     setLinkedOrderId(marker.order_id ?? null);
 
+    const visibleMarkers = markers.filter((m) => m.idx >= domain[0] && m.idx <= domain[1]);
     const allEls = Array.from(svgRef.current.querySelectorAll(".trade-marker"));
     const center = markerCenter(e.currentTarget);
     const nearby = allEls
-      .map((el, k) => ({ el, m: markers[k], c: markerCenter(el) }))
+      .map((el, k) => ({ el, m: visibleMarkers[k], c: markerCenter(el) }))
       .filter(({ c }) => Math.hypot(c.x - center.x, c.y - center.y) <= 12)
       .map(({ m }) => m)
       .sort((a, b) => a.date.localeCompare(b.date));
