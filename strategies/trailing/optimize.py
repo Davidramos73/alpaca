@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import argparse
 import itertools
 import json
@@ -19,6 +20,8 @@ SELL_RISE_RANGE    = [r / 100 for r in range(1, 11)]   # 1% … 10%
 
 BUY_AMOUNT    = 10_000.0
 STARTING_CASH = 100_000.0
+
+LOGS_DIR = "logs"   # cache .pkl, .log y .csv de cada corrida
 
 # ---------------------------------------------------------------------------
 # Simulación (misma lógica que backtest.py, sin I/O)
@@ -349,28 +352,33 @@ def main():
     parser.add_argument("--intervals",  type=str,   default="20",         help="Lista de intervalos de revisión en minutos, separados por coma (default: 20). Ej: 1,5,15,20,30,60,120")
     parser.add_argument("--export-equity-json", action="store_true", help="Exportar la curva de equity diaria (al cierre) de cada combinación drop/rise a un JSON, para graficar después")
     parser.add_argument("--trail-pcts", type=str, default=None, help="Lista de % de trailing stop a comparar contra la mejor combinación, separados por coma (ej. 0.5,1,1.5,2). Requiere un solo --intervals.")
+    parser.add_argument("--out-dir", type=str, default="viewer/public/data", help="Carpeta base donde escribir el JSON de equity para el visor React, organizado en out-dir/<símbolo>/ (default: viewer/public/data)")
     args = parser.parse_args()
 
     if args.export_equity_json and len(set(v.strip() for v in args.intervals.split(","))) > 1:
         print("Error: --export-equity-json requiere un solo --intervals (no una lista).")
-        return
+        sys.exit(1)
 
     if args.trail_pcts and len(set(v.strip() for v in args.intervals.split(","))) > 1:
         print("Error: --trail-pcts requiere un solo --intervals (no una lista).")
-        return
+        sys.exit(1)
 
     load_dotenv()
     api_key    = os.getenv("ALPACA_API_KEY")
     secret_key = os.getenv("ALPACA_SECRET_KEY")
     if not api_key or not secret_key:
         print("Error: credenciales no encontradas en .env")
-        return
+        sys.exit(1)
 
     # --- Descargar datos una sola vez (caché por símbolo y período) ---
     symbol     = args.symbol.upper()
     date_start = datetime.strptime(args.date_start, "%Y-%m-%d")
     date_end   = datetime.strptime(args.date_end,   "%Y-%m-%d")
-    cache_path = f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}_1Min.pkl"
+    if date_start >= date_end:
+        print(f"Error: date-start ({args.date_start}) debe ser anterior a date-end ({args.date_end}).")
+        sys.exit(1)
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    cache_path = os.path.join(LOGS_DIR, f"cache_{symbol}_{date_start.strftime('%Y%m%d')}_{date_end.strftime('%Y%m%d')}_1Min.pkl")
 
     if os.path.exists(cache_path):
         print(f"Cargando datos desde caché ({cache_path})…")
@@ -388,6 +396,12 @@ def main():
         df_1min = bars.df.reset_index()
         df_1min.to_pickle(cache_path)
         print(f"Datos guardados en caché ({cache_path})")
+
+    if len(df_1min) == 0:
+        print(f"Error: no se encontraron velas de 1 minuto para {symbol} entre {args.date_start} y {args.date_end}. "
+              f"Verificá el símbolo y el rango de fechas (puede estar fuera del histórico disponible o no tener "
+              f"días hábiles).")
+        sys.exit(1)
 
     print(f"Velas de 1 minuto cargadas: {len(df_1min)}\n")
 
@@ -431,8 +445,8 @@ def main():
 
     top_n     = 20
     run_ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path  = f"optimize_{symbol}_{run_ts}.log"
-    csv_path  = f"optimize_{symbol}_{run_ts}.csv"
+    log_path  = os.path.join(LOGS_DIR, f"optimize_{symbol}_{run_ts}.log")
+    csv_path  = os.path.join(LOGS_DIR, f"optimize_{symbol}_{run_ts}.csv")
 
     periodo_start = df_1min.iloc[0]["timestamp"].strftime("%Y-%m-%d")
     periodo_end   = df_1min.iloc[-1]["timestamp"].strftime("%Y-%m-%d")
@@ -449,6 +463,7 @@ def main():
             trade = {
                 "type":     "SELL" if ev["type"] == "SELL" else "BUY",
                 "date":     ev["timestamp"].strftime("%Y-%m-%d"),
+                "time":     ev["timestamp"].strftime("%H:%M"),
                 "price":    ev["price"],
                 "order_id": ev["order_id"],
             }
@@ -456,6 +471,7 @@ def main():
                 trade["buy_price"] = ev["buy_price"]
                 trade["profit"]    = ev["profit"]
                 trade["buy_date"]  = ev["buy_timestamp"].strftime("%Y-%m-%d")
+                trade["buy_time"]  = ev["buy_timestamp"].strftime("%H:%M")
             best_trades.append(trade)
 
         simulate(best_df, MAX_BUYS, best["buy_drop_pct"], best["sell_rise_pct"], fee_pct, use_pool, buy_amount,
@@ -587,10 +603,14 @@ def main():
     print(f"CSV guardado en  : {csv_path}")
 
     price_daily = None
+    symbol_dir  = None
 
     if args.export_equity_json:
+        symbol_dir = os.path.join(args.out_dir, symbol)
+        os.makedirs(symbol_dir, exist_ok=True)
         price_daily = daily_last(zip(df_1min["timestamp"], df_1min["close"].astype(float)))
-        equity_json_path = f"optimize_{symbol}_{run_ts}_equity.json"
+        equity_json_name = f"optimize_{symbol}_{run_ts}_equity.json"
+        equity_json_path = os.path.join(symbol_dir, equity_json_name)
         payload = {
             "symbol":       symbol,
             "date_start":   periodo_start,
@@ -620,6 +640,7 @@ def main():
                 trade = {
                     "type":     ev["type"],   # "BUY_INIT", "BUY_GRID", "SELL"
                     "date":     ev["timestamp"].strftime("%Y-%m-%d"),
+                    "time":     ev["timestamp"].strftime("%H:%M"),
                     "price":    ev["price"],
                     "order_id": ev["order_id"],
                 }
@@ -627,11 +648,11 @@ def main():
                     trade["buy_price"] = ev["buy_price"]
                     trade["profit"]    = ev["profit"]
                     trade["buy_date"]  = ev["buy_timestamp"].strftime("%Y-%m-%d")
+                    trade["buy_time"]  = ev["buy_timestamp"].strftime("%H:%M")
                     if "trailing_capture" in ev:
                         trade["trailing_capture"] = ev["trailing_capture"]
-                    
+
                 trades_trail.append(trade)
-                # Si quieres registrar compras, puedes añadirlas aquí (opcional)
 
             # Ejecutar simulación con trailing
             r_trail = simulate_trailing(
@@ -676,10 +697,15 @@ def main():
                 "trailing_sells":         r_trail["trailing_sells"],
             }
 
-            trail_json_path = f"optimize_{symbol}_{run_ts}_trail_{trail_pct*100:.1f}_equity.json"
+            trail_json_name = f"optimize_{symbol}_{run_ts}_trail_{trail_pct*100:.1f}_equity.json"
+            trail_json_path = os.path.join(symbol_dir, trail_json_name)
             with open(trail_json_path, "w", encoding="utf-8") as f:
                 json.dump(trail_payload, f)
             print(f"JSON de equity con trailing {trail_pct*100:.1f}%: {trail_json_path}")
+
+    if args.export_equity_json:
+        manifest_path = regenerate_manifest(args.out_dir)
+        print(f"Manifest visor   : {manifest_path}")
 
     if trailing_results:
         trail_sep = "-" * 80
