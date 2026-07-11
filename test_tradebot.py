@@ -75,3 +75,96 @@ def test_resync_does_not_crash_when_open_orders_pending(tmp_path):
 
     assert result is state
     assert not state_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# Reconstrucción de lotes desde el historial de fills de Alpaca
+# ---------------------------------------------------------------------------
+from tradebot import replay_fills_lifo, reconcile_with_broker
+
+
+def _fill(side, qty, price, order_id, ts):
+    return {"side": side, "qty": qty, "price": price, "order_id": order_id, "timestamp": ts}
+
+
+def _fill_api(side, qty, price, order_id, ts, symbol="TSLA", act_id="a1"):
+    """Dict con la forma que devuelve GET /v2/account/activities/FILL."""
+    return {"symbol": symbol, "side": side, "qty": str(qty), "price": str(price),
+            "order_id": order_id, "transaction_time": ts, "id": act_id}
+
+
+def test_replay_reconstruye_lotes_reales_con_ventas_lifo():
+    """Compras en bajada (418, 412, 408) y una venta LIFO parcial: deben
+    quedar abiertos los lotes viejos caros con sus precios REALES, no un
+    promedio."""
+    fills = [
+        _fill("buy", 2.4, 418.09, "o1", "2026-07-06T16:16:00Z"),
+        _fill("buy", 2.4, 412.91, "o2", "2026-07-07T13:54:00Z"),
+        _fill("buy", 2.4, 408.42, "o3", "2026-07-07T14:16:00Z"),
+        _fill("sell", 2.4, 411.00, "o4", "2026-07-09T14:01:00Z"),  # vende el último (408.42)
+    ]
+    lots = replay_fills_lifo(fills, broker_qty=4.8)
+    assert lots is not None
+    assert [l["price"] for l in lots] == [418.09, 412.91]
+    assert abs(sum(l["qty"] for l in lots) - 4.8) < 1e-9
+
+
+def test_replay_fusiona_fills_parciales_de_la_misma_orden():
+    """Alpaca parte una compra de 2.464 acc en fills de 1 + 1 + 0.464 con el
+    mismo order_id: deben fusionarse en UN lote (precio promedio ponderado)."""
+    fills = [
+        _fill("buy", 1.0, 400.00, "o1", "2026-07-08T13:33:00Z"),
+        _fill("buy", 1.0, 400.00, "o1", "2026-07-08T13:33:01Z"),
+        _fill("buy", 0.464, 400.10, "o1", "2026-07-08T13:33:01Z"),
+    ]
+    lots = replay_fills_lifo(fills, broker_qty=2.464)
+    assert lots is not None
+    assert len(lots) == 1
+    assert abs(lots[0]["qty"] - 2.464) < 1e-9
+    assert 400.00 < lots[0]["price"] < 400.10
+
+
+def test_replay_devuelve_none_si_no_cuadra():
+    """Historial incompleto (venta de acciones que los fills no explican) o
+    posición que no coincide: None, para que reconcile use el fallback."""
+    fills = [
+        _fill("buy", 1.0, 400.00, "o1", "2026-07-08T13:33:00Z"),
+        _fill("sell", 2.0, 405.00, "o2", "2026-07-09T13:33:00Z"),
+    ]
+    assert replay_fills_lifo(fills, broker_qty=1.0) is None
+    fills2 = [_fill("buy", 1.0, 400.00, "o1", "2026-07-08T13:33:00Z")]
+    assert replay_fills_lifo(fills2, broker_qty=5.0) is None
+
+
+def test_reconcile_usa_fills_reales_en_discrepancia(tmp_path):
+    """Reproduce el incidente del 2026-07-10: estado local vacío, posición
+    real en Alpaca. Con el historial de fills disponible, los lotes deben
+    reconstruirse con los precios reales de compra, no todos al promedio."""
+    stub = make_broker_stub(position_qty="4.8", avg_entry_price="415.50")
+    stub.get.return_value = [
+        _fill_api("buy", 2.4, 418.09, "o1", "2026-07-06T16:16:00Z", act_id="a1"),
+        _fill_api("buy", 2.4, 412.91, "o2", "2026-07-07T13:54:00Z", act_id="a2"),
+    ]
+    state = {"purchases": [], "profit_pool": 10.0}
+
+    result = reconcile_with_broker(stub, "TSLA", state, buy_amount=1000.0, max_buys=10)
+
+    assert result is not None
+    assert sorted(p["price"] for p in result["purchases"]) == [412.91, 418.09]
+    assert result["profit_pool"] == 0.0
+
+
+def test_reconcile_cae_al_promedio_si_fills_no_cuadran(tmp_path):
+    """Si el historial no explica la posición (trades manuales, historial
+    truncado), debe mantenerse el fallback actual: lotes al precio promedio."""
+    stub = make_broker_stub(position_qty="4.8", avg_entry_price="415.50")
+    stub.get.return_value = [
+        _fill_api("buy", 1.0, 418.09, "o1", "2026-07-06T16:16:00Z", act_id="a1"),
+    ]
+    state = {"purchases": [], "profit_pool": 0.0}
+
+    result = reconcile_with_broker(stub, "TSLA", state, buy_amount=1000.0, max_buys=10)
+
+    assert result is not None
+    assert all(p["price"] == 415.50 for p in result["purchases"])
+    assert abs(sum(p["qty"] for p in result["purchases"]) - 4.8) < 1e-6

@@ -51,22 +51,90 @@ def save_state(state: dict, state_file: str):
         logging.exception(f"Error al guardar estado en {state_file}")
 
 
+def fetch_symbol_fills(trading_client, symbol: str) -> list:
+    """Trae TODOS los fills del símbolo desde el historial de actividades de
+    Alpaca (endpoint /v2/account/activities/FILL, paginado — alpaca-py no lo
+    expone en TradingClient, así que se usa el .get() REST genérico) y los
+    normaliza a dicts ordenados cronológicamente."""
+    raw = []
+    page_token = None
+    while True:
+        params = {"page_size": 100}
+        if page_token:
+            params["page_token"] = page_token
+        page = trading_client.get("/account/activities/FILL", params)
+        if not page:
+            break
+        raw.extend(a for a in page if a.get("symbol") == symbol)
+        page_token = str(page[-1]["id"])
+        if len(page) < 100:
+            break
+    fills = []
+    for a in raw:
+        side = str(a.get("side", "")).lower()
+        fills.append({
+            "side": "buy" if "buy" in side else "sell",
+            "qty": abs(float(a["qty"])),
+            "price": float(a["price"]),
+            "order_id": str(a.get("order_id") or ""),
+            "timestamp": str(a.get("transaction_time", "")),
+        })
+    fills.sort(key=lambda f: f["timestamp"])
+    return fills
+
+
+def replay_fills_lifo(fills: list, broker_qty: float, tol: float = 1e-4) -> list | None:
+    """Reproduce los fills en orden cronológico para reconstruir los lotes
+    abiertos con sus precios REALES de compra. Los fills parciales de una
+    misma orden de compra se fusionan en un lote (precio promedio ponderado);
+    las ventas descuentan LIFO — la misma convención con la que el bot vende
+    (siempre el último lote) — así los lotes que quedan coinciden con los que
+    el grid habría dejado abiertos. Devuelve None si el resultado no cuadra
+    con la posición real (historial incompleto o trades manuales sobre el
+    mismo símbolo): en ese caso el caller debe usar el fallback por promedio."""
+    lots: list = []
+    for f in fills:
+        if f["side"] == "buy":
+            if lots and f["order_id"] and lots[-1]["order_id"] == f["order_id"]:
+                last = lots[-1]
+                total = last["qty"] + f["qty"]
+                last["price"] = (last["price"] * last["qty"] + f["price"] * f["qty"]) / total
+                last["qty"] = total
+            else:
+                lots.append({
+                    "price": f["price"], "qty": f["qty"],
+                    "order_id": f["order_id"] or "reconciled",
+                    "timestamp": f["timestamp"],
+                })
+        else:
+            rem = f["qty"]
+            while rem > tol and lots:
+                take = min(rem, lots[-1]["qty"])
+                lots[-1]["qty"] -= take
+                rem -= take
+                if lots[-1]["qty"] <= tol:
+                    lots.pop()
+            if rem > tol:
+                return None
+    if abs(sum(l["qty"] for l in lots) - broker_qty) > tol:
+        return None
+    for l in lots:
+        l["price"] = round(l["price"], 4)
+    return lots
+
+
 def reconcile_with_broker(
     trading_client, symbol: str, local_state: dict, buy_amount: float, max_buys: int
 ) -> dict | None:
     """Verifica el estado local contra Alpaca. Si hay órdenes abiertas sin
     resolver, no continúa (es ambiguo qué acción tomar). Si la posición real
-    no coincide con el estado local, reconstruye purchases directamente desde
-    `avg_entry_price`/`qty` de la posición actual en Alpaca -- sin depender del
-    historial de órdenes, que puede estar contaminado por otros bots/scripts
-    que operen el mismo símbolo en la misma cuenta.
-
-    La reconstrucción no intenta recuperar el precio exacto de cada compra
-    individual (imposible sin ese historial): reparte la posición en lotes de
-    tamaño ~buy_amount, todos al precio promedio, y resetea profit_pool a 0.
-    Esto conserva lo importante: que una venta pendiente se ejecute si el
-    precio ya cumple la condición, y que no se abran más compras de las que
-    permite max_buys dado el capital ya invertido."""
+    no coincide con el estado local, reconstruye purchases desde el historial
+    de fills de Alpaca (replay LIFO -> lotes con precios reales de compra).
+    Si el historial no cuadra con la posición (trades manuales sobre el mismo
+    símbolo, historial truncado), cae al fallback anterior: repartir la
+    posición en lotes de tamaño ~buy_amount, todos al precio promedio de
+    `avg_entry_price`. En ambos casos profit_pool se resetea a 0 (es un
+    concepto interno del bot, no recuperable desde Alpaca)."""
     try:
         open_orders = trading_client.get_orders(
             filter=GetOrdersRequest(symbols=[symbol], status=QueryOrderStatus.OPEN)
@@ -104,9 +172,33 @@ def reconcile_with_broker(
         "Reconstruyendo estado desde la posición real (se resetea profit_pool)."
     )
 
+    purchases: list | None = None
     if broker_qty <= 0:
-        purchases: list = []
+        purchases = []
     else:
+        try:
+            fills = fetch_symbol_fills(trading_client, symbol)
+            purchases = replay_fills_lifo(fills, broker_qty)
+        except Exception:
+            logging.exception(
+                f"No se pudo leer el historial de fills de {symbol}; "
+                "se reconstruirá por precio promedio."
+            )
+        if purchases is not None:
+            logging.warning(
+                f"Estado reconstruido desde el historial de fills de Alpaca: "
+                f"{len(purchases)} lote(s) con precios reales de compra, "
+                f"profit_pool=$0.00. Reemplazando estado local previo "
+                f"({len(local_purchases)} lote(s))."
+            )
+        else:
+            logging.warning(
+                f"El historial de fills de {symbol} no cuadra con la posición "
+                "(trades manuales o historial incompleto). Fallback: lotes al "
+                "precio promedio."
+            )
+
+    if purchases is None:
         position_value = broker_qty * avg_price
         estimated_lots = max(1, round(position_value / buy_amount))
         estimated_lots = min(estimated_lots, max_buys)
@@ -116,12 +208,11 @@ def reconcile_with_broker(
             {"price": avg_price, "qty": lot_qty, "order_id": "reconciled", "timestamp": now_iso}
             for _ in range(estimated_lots)
         ]
-
-    logging.warning(
-        f"Estado reconstruido desde Alpaca: {len(purchases)} lote(s) estimados "
-        f"a ${avg_price:.2f} c/u, profit_pool=$0.00. Reemplazando estado local "
-        f"previo ({len(local_purchases)} lote(s))."
-    )
+        logging.warning(
+            f"Estado reconstruido desde Alpaca: {len(purchases)} lote(s) estimados "
+            f"a ${avg_price:.2f} c/u, profit_pool=$0.00. Reemplazando estado local "
+            f"previo ({len(local_purchases)} lote(s))."
+        )
     for i, p in enumerate(purchases):
         logging.info(f"  [{i+1}] ${p['price']:.2f} | {p['qty']:.6f} acc | {p['timestamp']}")
 
