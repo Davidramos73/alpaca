@@ -87,3 +87,37 @@ def test_trailing_compra_armado_al_final_no_compra():
     r = _run([100, 98, 97, 96, 95])
     assert r["buys"] == 1
     assert r["open_positions"] == 1
+
+
+import json
+
+regenerate_manifest = mod.regenerate_manifest
+
+
+def _write_run_json(path, **overrides):
+    payload = {"symbol": "TSLA", "date_start": "2026-01-01", "date_end": "2026-06-28"}
+    payload.update(overrides)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+
+
+def test_manifest_una_entrada_por_corrida(tmp_path):
+    d = tmp_path / "TSLA"
+    d.mkdir()
+    _write_run_json(d / "optimize_TSLA_20260711_120000_equity.json")
+    _write_run_json(d / "optimize_TSLA_20260711_150000_equity.json")
+    regenerate_manifest(str(tmp_path))
+    manifest = json.load(open(tmp_path / "manifest.json"))
+    assert [e["run_ts"] for e in manifest] == ["20260711_150000", "20260711_120000"]
+    assert manifest[0]["file"] == "TSLA/optimize_TSLA_20260711_150000_equity.json"
+    assert manifest[0]["symbol"] == "TSLA"
+
+
+def test_manifest_ignora_archivos_ajenos(tmp_path):
+    d = tmp_path / "TSLA"
+    d.mkdir()
+    _write_run_json(d / "optimize_TSLA_20260711_120000_equity.json")
+    (d / "otracosa.json").write_text("{}")
+    regenerate_manifest(str(tmp_path))
+    manifest = json.load(open(tmp_path / "manifest.json"))
+    assert len(manifest) == 1
