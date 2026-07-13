@@ -129,3 +129,7 @@ table th:first-child, table td:first-child { text-align: left; }
 .run-form button:disabled { opacity: 0.6; cursor: not-allowed; }
 .run-status { margin-left: 10px; font-size: 12px; color: var(--text-secondary); }
 .run-error { margin-top: 10px; color: var(--marker-sell); font-size: 13px; }
+
+tr.row-clickable { cursor: pointer; }
+tr.row-clickable:hover td, tr.row-clickable:hover th { background: color-mix(in srgb, var(--price-line) 8%, transparent); }
+tr.row-clickable.active td, tr.row-clickable.active th { background: color-mix(in srgb, var(--price-line) 16%, transparent); }
