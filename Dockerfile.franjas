@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install uv
+
+COPY requirements.txt .
+RUN uv pip install --system --no-cache -r requirements.txt
+
+COPY strategies/franjas/tradebot_franjas.py .
+
+RUN mkdir /data
+ENV DATA_DIR=/data
+VOLUME ["/data"]
+
+CMD ["python", "-u", "tradebot_franjas.py"]
