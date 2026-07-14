@@ -5,6 +5,7 @@ const DEFAULTS = {
   date_start: "2026-01-01",
   date_end: "2026-06-28",
   buy_amount: 10000,
+  max_buys: 10,
   fee_pct: 0,
   trail_buy_pcts: "0.5,1,1.5",
   trail_sell_pcts: "0.5,1,1.5",
@@ -73,6 +74,12 @@ export default function RunForm({ onRunComplete }) {
           Monto por compra ($)
           <input type="number" min="1" step="1" value={form.buy_amount}
                  onChange={(e) => update("buy_amount", e.target.value)}
+                 disabled={running} required />
+        </label>
+        <label>
+          Compras máximas simultáneas
+          <input type="number" min="1" step="1" value={form.max_buys}
+                 onChange={(e) => update("max_buys", e.target.value)}
                  disabled={running} required />
         </label>
         <label>

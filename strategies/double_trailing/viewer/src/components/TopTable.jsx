@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { fmtMoney } from "../lib/chartMath";
 
 function pct(v) {
@@ -8,7 +9,19 @@ function money(v) {
   return v == null ? "—" : `${v >= 0 ? "+" : "-"}${fmtMoney(Math.abs(v))}`;
 }
 
+// Mapa de calor divergente: azul (ganancia) <-> gris (neutro) <-> rojo (pérdida),
+// con la intensidad escalada según el máximo |ROI%| presente en la tabla.
+function heatStyle(roi, maxAbs) {
+  if (roi == null || maxAbs === 0) return undefined;
+  const intensity = Math.min(Math.abs(roi) / maxAbs, 1);
+  const mixPct = Math.round(intensity * 65);
+  const hue = roi >= 0 ? "var(--price-line)" : "var(--marker-sell)";
+  return { background: `color-mix(in srgb, ${hue} ${mixPct}%, var(--surface-1))` };
+}
+
 export default function TopTable({ rows, selectedKey, onSelect }) {
+  const maxAbsRoi = useMemo(() => rows.reduce((max, r) => Math.max(max, Math.abs(r.roi)), 0), [rows]);
+
   return (
     <div className="panel">
       <h2>Top combinaciones vs. referencia vanilla</h2>
@@ -40,7 +53,7 @@ export default function TopTable({ rows, selectedKey, onSelect }) {
               <td>{pct(r.risePct)}</td>
               <td>{r.trailBuyPct == null ? "—" : `${r.trailBuyPct}%`}</td>
               <td>{r.trailSellPct == null ? "—" : `${r.trailSellPct}%`}</td>
-              <td>{r.roi >= 0 ? "+" : ""}{r.roi.toFixed(2)}%</td>
+              <td style={heatStyle(r.roi, maxAbsRoi)}>{r.roi >= 0 ? "+" : ""}{r.roi.toFixed(2)}%</td>
               <td>{money(r.profit)}</td>
               <td>{r.buys}</td>
               <td>{r.sells}</td>

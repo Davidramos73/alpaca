@@ -4,6 +4,7 @@ import sys
 import argparse
 import itertools
 import json
+from concurrent.futures import ProcessPoolExecutor
 import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
@@ -14,7 +15,6 @@ from alpaca.data.timeframe import TimeFrame
 # ---------------------------------------------------------------------------
 # Rangos de búsqueda (máximo 10%)
 # ---------------------------------------------------------------------------
-MAX_BUYS           = 10                                 # fijo, no modificable
 BUY_DROP_RANGE     = [r / 100 for r in range(1, 11)]   # 1% … 10%
 SELL_RISE_RANGE    = [r / 100 for r in range(1, 11)]   # 1% … 10%
 
@@ -27,35 +27,47 @@ LOGS_DIR = "logs"   # cache .pkl, .log y .csv de cada corrida
 # Simulación (misma lógica que backtest.py, sin I/O)
 # ---------------------------------------------------------------------------
 def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct: float, fee_pct: float, use_pool: bool = True, buy_amount: float = BUY_AMOUNT, interval_minutes: int = 1, on_trade=None, on_bar=None) -> dict:
-    cash        = STARTING_CASH
+    # Capital comprometido: lo que la estrategia puede llegar a invertir
+    # (más un colchón para fees). El ROI se mide sobre esta base.
+    starting_cash = buy_amount * max_buys * (1.0 + fee_pct)
+    cash        = starting_cash
     purchases   = []
     profit_pool = 0.0
     total_buys  = total_sells = 0
     total_fees  = 0.0
+    held_qty    = 0.0
+    invested    = 0.0  # costo (sin fee) de las posiciones abiertas — "capital expuesto"
 
-    for _, row in df.iterrows():
-        price = float(row["close"])
+    closes     = df["close"].to_numpy(dtype=float)
+    timestamps = df["timestamp"].to_list()
+
+    for i in range(len(closes)):
+        price     = closes[i]
+        timestamp = timestamps[i]
 
         if len(purchases) == 0:
             free_slots    = max_buys - len(purchases)
             bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
-            effective_buy = BUY_AMOUNT + bonus
-            qty     = effective_buy / price
+            effective_buy = buy_amount + bonus
             buy_fee = effective_buy * fee_pct
-            cash   -= effective_buy + buy_fee
-            if use_pool:
-                profit_pool -= bonus
-            total_fees += buy_fee
-            total_buys += 1
-            order_id = total_buys
-            purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy,
-                               "timestamp": row["timestamp"], "order_id": order_id})
-            if on_trade:
-                on_trade({"type": "BUY_INIT", "price": price, "qty": qty, "fee": buy_fee,
-                          "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
-                          "open_positions": len(purchases), "order_id": order_id})
+            if cash >= effective_buy + buy_fee:
+                qty     = effective_buy / price
+                cash   -= effective_buy + buy_fee
+                held_qty += qty
+                invested += effective_buy
+                if use_pool:
+                    profit_pool -= bonus
+                total_fees += buy_fee
+                total_buys += 1
+                order_id = total_buys
+                purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy,
+                                   "timestamp": timestamp, "order_id": order_id})
+                if on_trade:
+                    on_trade({"type": "BUY_INIT", "price": price, "qty": qty, "fee": buy_fee,
+                              "cash": cash, "pool": profit_pool, "timestamp": timestamp,
+                              "open_positions": len(purchases), "order_id": order_id})
             if on_bar:
-                on_bar(row["timestamp"], cash + sum(p["qty"] for p in purchases) * price)
+                on_bar(timestamp, cash + held_qty * price, invested)
             continue
 
         last_price  = purchases[-1]["price"]
@@ -66,20 +78,26 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             if len(purchases) < max_buys:
                 free_slots    = max_buys - len(purchases)
                 bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
-                effective_buy = BUY_AMOUNT + bonus
-                qty     = effective_buy / price
+                effective_buy = buy_amount + bonus
                 buy_fee = effective_buy * fee_pct
+                if cash < effective_buy + buy_fee:
+                    if on_bar:
+                        on_bar(timestamp, cash + held_qty * price, invested)
+                    continue
+                qty     = effective_buy / price
                 cash   -= effective_buy + buy_fee
+                held_qty += qty
+                invested += effective_buy
                 if use_pool:
                     profit_pool -= bonus
                 total_fees += buy_fee
                 total_buys += 1
                 order_id = total_buys
                 purchases.append({"price": price, "qty": qty, "buy_fee": buy_fee, "effective_buy": effective_buy,
-                                   "timestamp": row["timestamp"], "order_id": order_id})
+                                   "timestamp": timestamp, "order_id": order_id})
                 if on_trade:
                     on_trade({"type": "BUY_GRID", "price": price, "qty": qty, "fee": buy_fee,
-                              "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                              "cash": cash, "pool": profit_pool, "timestamp": timestamp,
                               "open_positions": len(purchases), "order_id": order_id})
 
         elif price >= sell_target:
@@ -87,6 +105,8 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
             revenue   = sold["qty"] * price
             sell_fee  = revenue * fee_pct
             cash     += revenue - sell_fee
+            held_qty -= sold["qty"]
+            invested -= sold["effective_buy"]
             total_fees += sell_fee
             total_sells += 1
             profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
@@ -94,19 +114,19 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
                 profit_pool += profit
             if on_trade:
                 on_trade({"type": "SELL", "price": price, "qty": sold["qty"], "fee": sell_fee,
-                          "cash": cash, "pool": profit_pool, "timestamp": row["timestamp"],
+                          "cash": cash, "pool": profit_pool, "timestamp": timestamp,
                           "open_positions": len(purchases),
                           "buy_price": sold["price"], "profit": profit, "buy_timestamp": sold["timestamp"],
                           "order_id": sold["order_id"]})
 
         if on_bar:
-            on_bar(row["timestamp"], cash + sum(p["qty"] for p in purchases) * price)
+            on_bar(timestamp, cash + held_qty * price, invested)
 
-    final_price    = float(df.iloc[-1]["close"])
+    final_price    = float(closes[-1])
     holdings_value = sum(p["qty"] for p in purchases) * final_price
     total_equity   = cash + holdings_value
-    profit         = total_equity - STARTING_CASH
-    roi            = (profit / STARTING_CASH) * 100
+    profit         = total_equity - starting_cash
+    roi            = (profit / starting_cash) * 100
 
     return {
         "interval_minutes": interval_minutes,
@@ -114,6 +134,7 @@ def simulate(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell_rise_pct
         "buy_drop_pct":   buy_drop_pct,
         "sell_rise_pct":  sell_rise_pct,
         "fee_pct":        fee_pct,
+        "starting_cash":  starting_cash,
         "roi":            roi,
         "profit":         profit,
         "total_equity":   total_equity,
@@ -132,7 +153,8 @@ def simulate_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell
     trailing_capture (por venta y total) es una métrica de reporte que
     compara contra el sell_target que hubiera vendido la versión vanilla.
     df debe ser el histórico de 1 minuto completo, sin resamplear."""
-    cash        = STARTING_CASH
+    starting_cash = buy_amount * max_buys * (1.0 + fee_pct)
+    cash        = starting_cash
     purchases   = []
     profit_pool = 0.0
     total_buys  = total_sells = 0
@@ -257,8 +279,8 @@ def simulate_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell
     final_price    = float(df.iloc[-1]["close"])
     holdings_value = sum(p["qty"] for p in purchases) * final_price
     total_equity   = cash + holdings_value
-    profit         = total_equity - STARTING_CASH
-    roi            = (profit / STARTING_CASH) * 100
+    profit         = total_equity - starting_cash
+    roi            = (profit / starting_cash) * 100
 
     return {
         "interval_minutes": interval_minutes,
@@ -267,6 +289,7 @@ def simulate_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: float, sell
         "sell_rise_pct":  sell_rise_pct,
         "fee_pct":        fee_pct,
         "trail_pct":      trail_pct,
+        "starting_cash":  starting_cash,
         "roi":            roi,
         "profit":         profit,
         "total_equity":   total_equity,
@@ -289,11 +312,14 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
     buy_capture (por compra y total) compara el precio pagado contra el
     precio al que se armó el trailing (lo que hubiera pagado la versión sin
     trailing de compra). df debe ser histórico de 1 minuto completo."""
-    cash        = STARTING_CASH
+    starting_cash = buy_amount * max_buys * (1.0 + fee_pct)
+    cash        = starting_cash
     purchases   = []
     profit_pool = 0.0
     total_buys  = total_sells = 0
     total_fees  = 0.0
+    held_qty    = 0.0
+    invested    = 0.0  # costo (sin fee) de las posiciones abiertas — "capital expuesto"
     trailing_capture_total = 0.0
     trailing_sells = 0
     buy_capture_total = 0.0
@@ -303,13 +329,17 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
     trailing_buy  = None  # {"valley", "arm", "arm_ref"}
 
     def _do_buy(price, timestamp, ev_type, buy_capture=None):
-        nonlocal cash, profit_pool, total_fees, total_buys, buy_capture_total, trailing_buys
+        nonlocal cash, held_qty, invested, profit_pool, total_fees, total_buys, buy_capture_total, trailing_buys
         free_slots    = max_buys - len(purchases)
         bonus         = (profit_pool / free_slots) if (use_pool and free_slots > 0) else 0.0
         effective_buy = buy_amount + bonus
-        qty     = effective_buy / price
         buy_fee = effective_buy * fee_pct
+        if cash < effective_buy + buy_fee:
+            return
+        qty     = effective_buy / price
         cash   -= effective_buy + buy_fee
+        held_qty += qty
+        invested += effective_buy
         if use_pool:
             profit_pool -= bonus
         total_fees += buy_fee
@@ -328,9 +358,12 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
         if on_trade:
             on_trade(ev)
 
-    for i, row in enumerate(df.itertuples(index=False)):
-        price     = float(row.close)
-        timestamp = row.timestamp
+    closes     = df["close"].to_numpy(dtype=float)
+    timestamps = df["timestamp"].to_list()
+
+    for i in range(len(closes)):
+        price     = closes[i]
+        timestamp = timestamps[i]
 
         if trailing_sell is not None:
             if price > trailing_sell["peak"]:
@@ -341,6 +374,8 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
                 revenue   = sold["qty"] * price
                 sell_fee  = revenue * fee_pct
                 cash     += revenue - sell_fee
+                held_qty -= sold["qty"]
+                invested -= sold["effective_buy"]
                 total_fees += sell_fee
                 total_sells += 1
                 profit = (revenue - sell_fee) - (sold["effective_buy"] + sold["buy_fee"])
@@ -357,7 +392,7 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
                               "order_id": sold["order_id"], "trailing_capture": capture})
                 trailing_sell = None
             if on_bar:
-                on_bar(timestamp, cash + sum(p["qty"] for p in purchases) * price)
+                on_bar(timestamp, cash + held_qty * price, invested)
             continue
 
         if trailing_buy is not None:
@@ -370,12 +405,12 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
                             buy_capture=trailing_buy["arm_ref"] - price)
                 trailing_buy = None
             if on_bar:
-                on_bar(timestamp, cash + sum(p["qty"] for p in purchases) * price)
+                on_bar(timestamp, cash + held_qty * price, invested)
             continue
 
         if i % interval_minutes != 0:
             if on_bar:
-                on_bar(timestamp, cash + sum(p["qty"] for p in purchases) * price)
+                on_bar(timestamp, cash + held_qty * price, invested)
             continue
 
         if len(purchases) == 0:
@@ -392,7 +427,7 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
                 trailing_sell = {"peak": price, "stop": price * (1.0 - trail_sell_pct), "sell_target_ref": sell_target}
 
         if on_bar:
-            on_bar(timestamp, cash + sum(p["qty"] for p in purchases) * price)
+            on_bar(timestamp, cash + held_qty * price, invested)
 
     # Fin de datos con trailing de venta activo: liquidar al último close.
     # (Con trailing de compra activo simplemente no se compra.)
@@ -418,11 +453,11 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
                       "buy_price": sold["price"], "profit": profit, "buy_timestamp": sold["timestamp"],
                       "order_id": sold["order_id"], "trailing_capture": capture})
 
-    final_price    = float(df.iloc[-1]["close"])
+    final_price    = float(closes[-1])
     holdings_value = sum(p["qty"] for p in purchases) * final_price
     total_equity   = cash + holdings_value
-    profit         = total_equity - STARTING_CASH
-    roi            = (profit / STARTING_CASH) * 100
+    profit         = total_equity - starting_cash
+    roi            = (profit / starting_cash) * 100
 
     return {
         "interval_minutes": interval_minutes,
@@ -430,6 +465,7 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
         "buy_drop_pct":    buy_drop_pct,
         "sell_rise_pct":   sell_rise_pct,
         "fee_pct":         fee_pct,
+        "starting_cash":   starting_cash,
         "trail_buy_pct":   trail_buy_pct,
         "trail_sell_pct":  trail_sell_pct,
         "roi":             roi,
@@ -445,6 +481,26 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
         "trailing_buys":          trailing_buys,
     }
 
+# ---------------------------------------------------------------------------
+# Grid en paralelo: cada proceso recibe el histórico una sola vez (initializer)
+# y resuelve combos independientes.
+# ---------------------------------------------------------------------------
+_WORKER_DF = None
+
+def _init_worker(df_1min):
+    global _WORKER_DF
+    _WORKER_DF = df_1min
+
+def _run_vanilla_combo(job):
+    buy_drop, sell_rise, max_buys, fee_pct, use_pool, buy_amount = job
+    return simulate(_WORKER_DF, max_buys, buy_drop, sell_rise, fee_pct, use_pool, buy_amount, 1)
+
+def _run_dt_combo(job):
+    buy_drop, sell_rise, tb, tsell, max_buys, fee_pct, use_pool, buy_amount = job
+    return simulate_double_trailing(_WORKER_DF, max_buys, buy_drop, sell_rise, fee_pct,
+                                     use_pool, buy_amount, 1, trail_buy_pct=tb, trail_sell_pct=tsell)
+
+
 def daily_last(records: list[tuple]) -> list[dict]:
     """Reduce una serie (timestamp, valor) a un punto por día de calendario
     (el último valor visto ese día, que con datos intradía ordenados es el
@@ -453,6 +509,16 @@ def daily_last(records: list[tuple]) -> list[dict]:
     for ts, value in records:
         daily[ts.date()] = value
     return [{"date": d.isoformat(), "value": v} for d, v in sorted(daily.items())]
+
+def daily_last_exposure(records: list[tuple]) -> list[dict]:
+    """Como daily_last(), pero reduce (timestamp, equity, exposure) a un punto
+    diario con ambos campos — exposure es el costo (sin fee) de las
+    posiciones abiertas en ese momento, i.e. cuánto del budget está
+    efectivamente invertido en el mercado."""
+    daily: dict = {}
+    for ts, equity, exposure in records:
+        daily[ts.date()] = (equity, exposure)
+    return [{"date": d.isoformat(), "equity": v[0], "exposure": v[1]} for d, v in sorted(daily.items())]
 
 RUN_EQUITY_RE = re.compile(r"^optimize_(?P<symbol>[^_]+)_(?P<run_ts>\d{8}_\d{6})_equity\.json$")
 
@@ -491,8 +557,8 @@ def regenerate_manifest(out_dir: str) -> str:
 def _capture_callbacks(trades_out, bars_out):
     """Devuelve (on_trade, on_bar) que registran trades en formato del viewer
     y equity por barra para reducir a diario."""
-    def on_bar(ts, eq):
-        bars_out.append((ts, eq))
+    def on_bar(ts, eq, exposure):
+        bars_out.append((ts, eq, exposure))
 
     def on_trade(ev):
         trade = {
@@ -521,6 +587,7 @@ def main():
     parser.add_argument("--date-start", type=str,   default="2026-01-01", help="Fecha inicio YYYY-MM-DD (default: 2026-01-01)")
     parser.add_argument("--date-end",   type=str,   default="2026-06-28", help="Fecha fin YYYY-MM-DD (default: 2026-06-28)")
     parser.add_argument("--buy-amount", type=float, default=10_000.0,     help="Monto base por compra en USD (default: 10000)")
+    parser.add_argument("--max-buys",   type=int,   default=10,           help="Máximo de compras activas simultáneas (default: 10)")
     parser.add_argument("--fee-pct",    type=float, default=0.0,          help="Fee por operación sobre el monto (default: 0.0). Ej: 0.001 = 0.1%%")
     parser.add_argument("--no-profit-pool", action="store_true",          help="Desactivar reinversión de ganancias (modo clásico)")
     parser.add_argument("--trail-buy-pcts",  type=str, default="0.5,1,1.5", help="Lista de %% de rebote para el trailing de compra, separados por coma (default: 0.5,1,1.5)")
@@ -585,32 +652,35 @@ def main():
 
     fee_pct    = args.fee_pct
     buy_amount = args.buy_amount
+    max_buys   = args.max_buys
     use_pool   = not args.no_profit_pool
 
-    # --- Referencia vanilla: grilla 2D drop x rise a intervalo 1 min ---
-    vanilla_combos = list(itertools.product(BUY_DROP_RANGE, SELL_RISE_RANGE))
-    print(f"Fase vanilla: {len(vanilla_combos)} combinaciones drop/rise (referencia)…")
-    vanilla_results = []
-    for buy_drop, sell_rise in vanilla_combos:
-        vanilla_results.append(simulate(df_1min, MAX_BUYS, buy_drop, sell_rise, fee_pct, use_pool, buy_amount, 1))
-    vanilla_results.sort(key=lambda r: r["roi"], reverse=True)
-    vanilla_best = vanilla_results[0]
+    workers = os.cpu_count() or 1
+    with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker, initargs=(df_1min,)) as executor:
+        # --- Referencia vanilla: grilla 2D drop x rise a intervalo 1 min ---
+        vanilla_combos = list(itertools.product(BUY_DROP_RANGE, SELL_RISE_RANGE))
+        print(f"Fase vanilla: {len(vanilla_combos)} combinaciones drop/rise (referencia)…")
+        vanilla_jobs = [(buy_drop, sell_rise, max_buys, fee_pct, use_pool, buy_amount)
+                        for buy_drop, sell_rise in vanilla_combos]
+        vanilla_results = list(executor.map(_run_vanilla_combo, vanilla_jobs, chunksize=2))
+        vanilla_results.sort(key=lambda r: r["roi"], reverse=True)
+        vanilla_best = vanilla_results[0]
 
-    # --- Grilla 4D double trailing ---
-    combos = list(itertools.product(BUY_DROP_RANGE, SELL_RISE_RANGE, trail_buy_pcts, trail_sell_pcts))
-    total  = len(combos)
-    print(f"Grilla double trailing: {total} combinaciones "
-          f"(drop x rise x trail_buy {[p*100 for p in trail_buy_pcts]} x trail_sell {[p*100 for p in trail_sell_pcts]}; "
-          f"max_buys fijo = {MAX_BUYS}, buy_amount = ${buy_amount:,.0f}, fee = {fee_pct*100:.3f}%, pool = {'ON' if use_pool else 'OFF'})…\n")
+        # --- Grilla 4D double trailing ---
+        combos = list(itertools.product(BUY_DROP_RANGE, SELL_RISE_RANGE, trail_buy_pcts, trail_sell_pcts))
+        total  = len(combos)
+        print(f"Grilla double trailing: {total} combinaciones "
+              f"(drop x rise x trail_buy {[p*100 for p in trail_buy_pcts]} x trail_sell {[p*100 for p in trail_sell_pcts]}; "
+              f"max_buys = {max_buys}, buy_amount = ${buy_amount:,.0f}, fee = {fee_pct*100:.3f}%, pool = {'ON' if use_pool else 'OFF'})…\n")
 
-    results = []
-    for done, (buy_drop, sell_rise, tb, tsell) in enumerate(combos, 1):
-        if done % 10 == 0 or done == total:
-            print(f"  {done}/{total}", end="\r")
-        results.append(simulate_double_trailing(df_1min, MAX_BUYS, buy_drop, sell_rise, fee_pct,
-                                                use_pool, buy_amount, 1,
-                                                trail_buy_pct=tb, trail_sell_pct=tsell))
-    results.sort(key=lambda r: r["roi"], reverse=True)
+        dt_jobs = [(buy_drop, sell_rise, tb, tsell, max_buys, fee_pct, use_pool, buy_amount)
+                   for buy_drop, sell_rise, tb, tsell in combos]
+        results = []
+        for done, r in enumerate(executor.map(_run_dt_combo, dt_jobs, chunksize=2), 1):
+            if done % 10 == 0 or done == total:
+                print(f"  {done}/{total}", end="\r")
+            results.append(r)
+        results.sort(key=lambda r: r["roi"], reverse=True)
 
     top_n    = 20
     run_ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -651,8 +721,8 @@ def main():
         sep,
         f"  Período analizado:  {periodo_start}  →  {periodo_end}",
         f"  Velas de 1 minuto:  {len(df_1min)}   |   Intervalo fijo: 1 min",
-        f"  Capital inicial:    ${STARTING_CASH:,.2f}   |   Monto por compra: ${buy_amount:,.2f}",
-        f"  max_buys (fijo):    {MAX_BUYS}",
+        f"  Capital comprometido: ${buy_amount * max_buys * (1.0 + fee_pct):,.2f}   |   Monto por compra: ${buy_amount:,.2f}",
+        f"  max_buys:           {max_buys}",
         f"  Combinaciones evaluadas: {total} (double trailing) + {len(vanilla_combos)} (vanilla referencia)",
         sep2,
         f"  REFERENCIA VANILLA (mejor drop/rise sin trailing)",
@@ -702,7 +772,7 @@ def main():
         # Series de la referencia vanilla (re-corre el mejor combo con callbacks)
         v_trades, v_bars = [], []
         on_trade, on_bar = _capture_callbacks(v_trades, v_bars)
-        simulate(df_1min, MAX_BUYS, vanilla_best["buy_drop_pct"], vanilla_best["sell_rise_pct"],
+        simulate(df_1min, max_buys, vanilla_best["buy_drop_pct"], vanilla_best["sell_rise_pct"],
                  fee_pct, use_pool, buy_amount, 1, on_trade=on_trade, on_bar=on_bar)
         vanilla_payload = {
             "drop_pct": round(vanilla_best["buy_drop_pct"] * 100),
@@ -711,7 +781,7 @@ def main():
             "profit":   vanilla_best["profit"],
             "buys":     vanilla_best["buys"],
             "sells":    vanilla_best["sells"],
-            "equity":   [{"date": p["date"], "equity": p["value"]} for p in daily_last(v_bars)],
+            "equity":   daily_last_exposure(v_bars),
             "trades":   v_trades,
         }
 
@@ -721,7 +791,7 @@ def main():
         for r in results[:top_n]:
             c_trades, c_bars = [], []
             on_trade, on_bar = _capture_callbacks(c_trades, c_bars)
-            simulate_double_trailing(df_1min, MAX_BUYS, r["buy_drop_pct"], r["sell_rise_pct"], fee_pct,
+            simulate_double_trailing(df_1min, max_buys, r["buy_drop_pct"], r["sell_rise_pct"], fee_pct,
                                      use_pool, buy_amount, 1,
                                      trail_buy_pct=r["trail_buy_pct"], trail_sell_pct=r["trail_sell_pct"],
                                      on_trade=on_trade, on_bar=on_bar)
@@ -737,7 +807,7 @@ def main():
                 "open_positions": r["open_positions"],
                 "buy_capture_total":      r["buy_capture_total"],
                 "trailing_capture_total": r["trailing_capture_total"],
-                "equity": [{"date": p["date"], "equity": p["value"]} for p in daily_last(c_bars)],
+                "equity": daily_last_exposure(c_bars),
                 "trades": c_trades,
             })
 
@@ -745,7 +815,7 @@ def main():
             "symbol":        symbol,
             "date_start":    periodo_start,
             "date_end":      periodo_end,
-            "starting_cash": STARTING_CASH,
+            "starting_cash": buy_amount * max_buys * (1.0 + fee_pct),
             "price":         [{"date": p["date"], "close": p["value"]} for p in price_daily],
             "vanilla":       vanilla_payload,
             "combos":        combos_payload,

@@ -29,7 +29,7 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const TRAIL_PCTS_RE = /^\d+(\.\d+)?(\s*,\s*\d+(\.\d+)?)*$/
 
 function validateParams(body) {
-  const { symbol, date_start, date_end, buy_amount, fee_pct, trail_buy_pcts, trail_sell_pcts } = body
+  const { symbol, date_start, date_end, buy_amount, max_buys, fee_pct, trail_buy_pcts, trail_sell_pcts } = body
   if (typeof symbol !== 'string' || !SYMBOL_RE.test(symbol.toUpperCase())) {
     return 'symbol inválido'
   }
@@ -37,6 +37,8 @@ function validateParams(body) {
   if (typeof date_end !== 'string' || !DATE_RE.test(date_end)) return 'date_end inválido'
   const amount = Number(buy_amount)
   if (!Number.isFinite(amount) || amount <= 0) return 'buy_amount inválido'
+  const maxBuys = Number(max_buys)
+  if (!Number.isInteger(maxBuys) || maxBuys <= 0) return 'max_buys inválido'
   const fee = Number(fee_pct)
   if (!Number.isFinite(fee) || fee < 0) return 'fee_pct inválido'
   if (typeof trail_buy_pcts !== 'string' || !TRAIL_PCTS_RE.test(trail_buy_pcts.trim())) return 'trail_buy_pcts inválido'
@@ -83,6 +85,7 @@ function runOptimizeMiddleware() {
               '--date-start', body.date_start,
               '--date-end', body.date_end,
               '--buy-amount', String(Number(body.buy_amount)),
+              '--max-buys', String(Number(body.max_buys)),
               '--fee-pct', String(Number(body.fee_pct)),
               '--export-equity-json',
               '--trail-buy-pcts', body.trail_buy_pcts.trim(),

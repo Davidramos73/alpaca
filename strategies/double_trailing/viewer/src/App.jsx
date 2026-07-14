@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import TopTable from "./components/TopTable";
 import TrailingTradesChart from "./components/TrailingTradesChart";
 import IndexedEquityChart from "./components/IndexedEquityChart";
+import ExposureChart from "./components/ExposureChart";
 import RunForm from "./components/RunForm";
 import Tooltip from "./components/Tooltip";
 import { useTooltip } from "./hooks/useTooltip";
@@ -202,6 +203,16 @@ export default function App() {
                 <IndexedEquityChart
                   id="equity-compare"
                   price={runData.price}
+                  vanillaEquity={runData.vanilla.equity}
+                  trailingEquity={activeCombo.equity}
+                  trailingLabel={`DT ${activeCombo.trail_buy_pct}%/${activeCombo.trail_sell_pct}%`}
+                  showTooltip={show}
+                  hideTooltip={hide}
+                />
+                <ExposureChart
+                  id="exposure-compare"
+                  price={runData.price}
+                  committedCapital={runData.starting_cash}
                   vanillaEquity={runData.vanilla.equity}
                   trailingEquity={activeCombo.equity}
                   trailingLabel={`DT ${activeCombo.trail_buy_pct}%/${activeCombo.trail_sell_pct}%`}
