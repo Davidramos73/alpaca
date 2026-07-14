@@ -1,0 +1,33 @@
+# Bot de grid con franjas (drop/rise variable según profundidad de caída).
+#
+#   docker compose -f docker-compose-tradebot-franjas.yml up -d --build
+#
+# Toma credenciales y parámetros de .env; cualquier variable definida en la
+# shell al levantar el compose pisa a la del .env. Variables que lee el bot:
+#   ALPACA_API_KEY / ALPACA_SECRET_KEY / PAPER (default true)
+#   SYMBOL       — obligatorio, ej. TSLA
+#   BUY_AMOUNT   — USD por compra (default 1000)
+#   MAX_BUYS     — lotes simultáneos máximos (default 10)
+#   DROPS        — drop % por franja, ej. 2,2,2
+#   RISES        — rise % por franja, ej. 3,5,7
+#   BANDS        — límites de franja en % de caída, ej. 6,10
+#   INTERVAL     — segundos entre ciclos (default 1200)
+services:
+  tradebot-franjas:
+    build:
+      context: .
+      dockerfile: Dockerfile.franjas
+    env_file: .env
+    # Passthrough: si la variable está definida en la shell al levantar el
+    # compose, pisa a la del .env; si no, queda la del .env (o el default).
+    environment:
+      - SYMBOL
+      - BUY_AMOUNT
+      - MAX_BUYS
+      - DROPS
+      - RISES
+      - BANDS
+      - INTERVAL
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
