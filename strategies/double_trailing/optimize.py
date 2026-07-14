@@ -368,7 +368,8 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
         if trailing_sell is not None:
             if price > trailing_sell["peak"]:
                 trailing_sell["peak"] = price
-                trailing_sell["stop"] = trailing_sell["peak"] * (1.0 - trail_sell_pct)
+                trailing_sell["stop"] = max(trailing_sell["peak"] * (1.0 - trail_sell_pct),
+                                            trailing_sell["sell_target_ref"])
             if price <= trailing_sell["stop"]:
                 sold      = purchases.pop()
                 revenue   = sold["qty"] * price
@@ -398,7 +399,8 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
         if trailing_buy is not None:
             if price < trailing_buy["valley"]:
                 trailing_buy["valley"] = price
-                trailing_buy["arm"]    = trailing_buy["valley"] * (1.0 + trail_buy_pct)
+                trailing_buy["arm"]    = min(trailing_buy["valley"] * (1.0 + trail_buy_pct),
+                                             trailing_buy["arm_ref"])
             if price >= trailing_buy["arm"]:
                 if len(purchases) < max_buys:
                     _do_buy(price, timestamp, "BUY_GRID",
@@ -422,9 +424,15 @@ def simulate_double_trailing(df: pd.DataFrame, max_buys: int, buy_drop_pct: floa
 
             if price <= buy_target:
                 if len(purchases) < max_buys:
-                    trailing_buy = {"valley": price, "arm": price * (1.0 + trail_buy_pct), "arm_ref": price}
+                    # arm arranca capado en el precio de gatillo: si el precio
+                    # rebota sin caer más, se compra igual que vanilla.
+                    trailing_buy = {"valley": price, "arm": price, "arm_ref": price}
             elif price >= sell_target:
-                trailing_sell = {"peak": price, "stop": price * (1.0 - trail_sell_pct), "sell_target_ref": sell_target}
+                # stop con piso en el sell_target: nunca vender debajo de
+                # donde hubiera vendido la versión vanilla.
+                trailing_sell = {"peak": price,
+                                 "stop": max(price * (1.0 - trail_sell_pct), sell_target),
+                                 "sell_target_ref": sell_target}
 
         if on_bar:
             on_bar(timestamp, cash + held_qty * price, invested)

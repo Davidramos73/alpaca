@@ -121,3 +121,32 @@ def test_manifest_ignora_archivos_ajenos(tmp_path):
     regenerate_manifest(str(tmp_path))
     manifest = json.load(open(tmp_path / "manifest.json"))
     assert len(manifest) == 1
+
+
+def test_techo_de_compra_no_paga_mas_que_el_gatillo():
+    # BUY_INIT a 100; gatillo de compra a 98 arma el trailing. Sin el techo,
+    # el arm queda en 98*1.01 = 98.98 y un rebote inmediato a 98 no compra
+    # (y compraría más caro después). Con el techo arm = min(valley*1.01, 98),
+    # el rebote a 98 compra a 98 — igual que vanilla, nunca peor.
+    r = _run([100, 98, 98, 98])
+    assert r["buys"] == 2
+    trades = []
+    simulate_double_trailing(_df([100, 98, 98, 98]), 10, 0.02, 0.07, 0.0, True, 10_000.0, 1,
+                             trail_buy_pct=0.01, trail_sell_pct=0.01,
+                             on_trade=trades.append)
+    grid_buys = [t for t in trades if t["type"] == "BUY_GRID"]
+    assert grid_buys[0]["price"] == 98.0
+
+
+def test_piso_de_venta_no_vende_debajo_del_target():
+    # BUY_INIT a 100, target de venta 107. El precio toca 107 (arma trailing)
+    # y retrocede a 106.5. Sin piso, el stop queda en 107*0.99 = 105.93 y no
+    # vende. Con piso stop = max(peak*0.99, 107): el retroceso bajo el target
+    # dispara la venta de inmediato en vez de regalar el 1% de trailing.
+    trades = []
+    simulate_double_trailing(_df([100, 107, 106.5, 106.8, 106.8]), 10, 0.02, 0.07, 0.0, True, 10_000.0, 1,
+                             trail_buy_pct=0.01, trail_sell_pct=0.01,
+                             on_trade=trades.append)
+    sells = [t for t in trades if t["type"] == "SELL"]
+    assert len(sells) == 1
+    assert sells[0]["price"] == 106.5
