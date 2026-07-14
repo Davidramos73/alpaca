@@ -251,6 +251,53 @@ def wait_for_order_fill(trading_client, order_id, max_attempts=15, delay=1):
     raise TimeoutError(f"La orden {order_id} no se completó en el tiempo esperado.")
 
 
+def resolve_pending_order(trading_client, order_id):
+    """Se llama cuando wait_for_order_fill se rindió sin confirmar. Nunca
+    asume que la orden falló: consulta su estado real en Alpaca. Si en
+    realidad ya se llenó (solo tardó más de lo esperado), la toma como
+    exitosa. Si sigue viva, la cancela explícitamente y vuelve a
+    consultarla — cancelar puede perder la carrera contra un fill que llega
+    justo en ese instante, por eso el segundo chequeo es la fuente de
+    verdad. Nunca deja la orden flotando para que el caller reintente a
+    ciegas (eso fue lo que causó una triple venta del mismo lote en
+    producción: dos órdenes 'timeouteadas' terminaron llenándose igual)."""
+    try:
+        order = trading_client.get_order_by_id(order_id)
+    except Exception:
+        logging.exception(f"No se pudo consultar la orden {order_id} tras el timeout")
+        return None
+
+    if order.status == OrderStatus.FILLED:
+        return order
+    if order.status in (OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED):
+        filled_qty = float(order.filled_qty or 0)
+        if filled_qty > 0:
+            logging.warning(f"Orden {order_id} terminó {order.status.value} con fill parcial de {filled_qty:.6f}.")
+            return order
+        return None
+
+    logging.warning(f"Orden {order_id} sigue '{order.status.value}' tras el timeout. Cancelando antes de reintentar...")
+    try:
+        trading_client.cancel_order_by_id(order_id)
+    except Exception:
+        logging.exception(f"No se pudo cancelar la orden {order_id}")
+
+    try:
+        order = trading_client.get_order_by_id(order_id)
+    except Exception:
+        logging.exception(f"No se pudo re-consultar la orden {order_id} tras cancelarla")
+        return None
+
+    filled_qty = float(order.filled_qty or 0)
+    if order.status == OrderStatus.FILLED or filled_qty > 0:
+        if order.status != OrderStatus.FILLED:
+            logging.warning(f"Orden {order_id} quedó con fill parcial ({filled_qty:.6f}) pese a la cancelación.")
+        return order
+
+    logging.info(f"Orden {order_id} cancelada limpia, sin ejecución. Segura para reintentar.")
+    return None
+
+
 def execute_buy(trading_client, symbol: str, amount: float) -> dict | None:
     try:
         account = trading_client.get_account()
@@ -274,7 +321,16 @@ def execute_buy(trading_client, symbol: str, amount: float) -> dict | None:
         order = trading_client.submit_order(req)
         logging.info(f"Orden enviada. ID: {order.id}. Esperando ejecución...")
 
-        filled = wait_for_order_fill(trading_client, order.id)
+        try:
+            filled = wait_for_order_fill(trading_client, order.id)
+        except TimeoutError:
+            logging.error(f"Timeout esperando confirmación de compra ({order.id}). Verificando estado real en Alpaca...")
+            filled = resolve_pending_order(trading_client, order.id)
+            if filled is None:
+                logging.error(f"Compra {order.id} cancelada sin ejecución. Nada que registrar.")
+                return None
+            logging.warning(f"Compra {order.id} se resolvió tras el timeout (fill tardío o parcial).")
+
         filled_price = float(filled.filled_avg_price)
         filled_qty   = float(filled.filled_qty)
         filled_at    = filled.filled_at.isoformat() if filled.filled_at else datetime.utcnow().isoformat()
@@ -282,9 +338,6 @@ def execute_buy(trading_client, symbol: str, amount: float) -> dict | None:
         logging.info(f"¡COMPRA COMPLETADA! Precio: ${filled_price:.2f} | Acciones: {filled_qty:.6f}")
         return {"price": filled_price, "qty": filled_qty, "order_id": str(filled.id), "timestamp": filled_at}
 
-    except TimeoutError:
-        logging.error("Timeout esperando confirmación de compra. Revisar manualmente en Alpaca.")
-        return None
     except Exception:
         logging.exception(f"Error al ejecutar compra de {symbol}")
         return None
@@ -321,7 +374,16 @@ def execute_sell(trading_client, symbol: str, qty: float) -> dict | None:
         order = trading_client.submit_order(req)
         logging.info(f"Orden enviada. ID: {order.id}. Esperando ejecución...")
 
-        filled = wait_for_order_fill(trading_client, order.id)
+        try:
+            filled = wait_for_order_fill(trading_client, order.id)
+        except TimeoutError:
+            logging.error(f"Timeout esperando confirmación de venta ({order.id}). Verificando estado real en Alpaca...")
+            filled = resolve_pending_order(trading_client, order.id)
+            if filled is None:
+                logging.error(f"Venta {order.id} cancelada sin ejecución. Nada que registrar.")
+                return None
+            logging.warning(f"Venta {order.id} se resolvió tras el timeout (fill tardío o parcial).")
+
         filled_price = float(filled.filled_avg_price)
         filled_qty   = float(filled.filled_qty)
         filled_at    = filled.filled_at.isoformat() if filled.filled_at else datetime.utcnow().isoformat()
@@ -329,9 +391,6 @@ def execute_sell(trading_client, symbol: str, qty: float) -> dict | None:
         logging.info(f"¡VENTA COMPLETADA! Precio: ${filled_price:.2f} | Acciones: {filled_qty:.6f}")
         return {"price": filled_price, "qty": filled_qty, "order_id": str(filled.id), "timestamp": filled_at}
 
-    except TimeoutError:
-        logging.error("Timeout esperando confirmación de venta. Revisar manualmente en Alpaca.")
-        return None
     except Exception:
         logging.exception(f"Error al ejecutar venta de {symbol}")
         return None
